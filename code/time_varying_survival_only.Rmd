@@ -1,0 +1,703 @@
+---
+title: "survival analysis"
+author: "Yihan Wang"
+date: "2025-01-04"
+output: word_document
+---
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+library(survival)
+library(randomForestSRC)
+library(broom)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(pROC)
+library(mRMRe)
+library(kml)
+library(rgl)
+library(longitudinalData)
+library(doParallel)
+library(foreach)
+library(dtw)
+library(cluster)  
+library(factoextra)
+library(parallel)
+library(survival)
+library(timeROC)
+library(dplyr)
+```
+
+
+############ Time-Varying Cox Model ###############
+######## internal validation ##########
+```{r}
+# 3-Fold Cross-Validation Function with Multiple Iterations and High Correlation Handling
+do_internal_cv_time_varying_cox <- function(data, folds = 3, iterations = 10) {
+  
+  # Extract predictors
+  predictors <- setdiff(names(data), c("start", "stop", "event", "ID"))
+
+  # Check for highly correlated variables and drop them
+  corr_matrix <- cor(data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
+  high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
+  high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
+  
+  if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
+    vars_to_remove <- unique(rownames(high_corr_pairs))
+    cat("Highly correlated variables detected. Dropping the following variables:\n")
+    print(vars_to_remove)
+    predictors <- setdiff(predictors, vars_to_remove)
+    data <- data %>% select(-all_of(vars_to_remove))
+  }
+  
+  # Scale the predictors
+  data <- data %>%
+    mutate(across(everything(), as.numeric)) %>%
+    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+
+  formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + ")))
+
+  # Initialize storage for results
+  all_c_index_list <- list()
+  all_auc_results <- list()
+
+  for (iter in 1:iterations) {
+    set.seed(iter)
+    
+    # Split data into folds based on ID
+    unique_ids <- unique(data$ID)
+    fold_assignments <- sample(rep(1:folds, length.out = length(unique_ids)))
+    names(fold_assignments) <- unique_ids
+    c_index_list <- list()
+    auc_results <- list()
+
+    for (fold in 1:folds) {
+      train_ids <- unique_ids[fold_assignments != fold]
+      test_ids <- unique_ids[fold_assignments == fold]
+      train_data <- data[data$ID %in% train_ids, ]
+      test_data <- data[data$ID %in% test_ids, ]
+
+      # Fit Cox proportional hazards model
+      cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron")
+      risk_scores <- predict(cox_model, newdata = test_data, type = "risk")
+
+      # Compute C-index
+      c_index <- concordance(cox_model, newdata = test_data)$concordance
+      c_index_list[[fold]] <- c_index
+
+      # Compute AUC for specified time points
+      times <- unique(test_data$stop)
+      times <- as.numeric(times)
+      times <- times[!is.na(times) & times > 0]  # Remove NA and non-positive times
+
+      auc_result <- timeROC(
+        T = test_data$stop,
+        delta = test_data$event,
+        marker = risk_scores,
+        cause = 1,
+        times = times
+      )
+      auc_results[[fold]] <- auc_result
+    }
+
+    all_c_index_list[[iter]] <- c_index_list
+    all_auc_results[[iter]] <- do.call(rbind, lapply(1:folds, function(fold) {
+      data.frame(
+        Iteration = iter,
+        Fold = fold,
+        Time = auc_results[[fold]]$times,
+        AUC = auc_results[[fold]]$AUC
+      )
+    }))
+  }
+
+  auc_summary <- do.call(rbind, all_auc_results)
+  auc_stats <- auc_summary %>%
+    group_by(Time) %>%
+    summarise(
+      Median_AUC = median(AUC, na.rm = TRUE),
+      Q1_AUC = quantile(AUC, 0.25, na.rm = TRUE),
+      Q3_AUC = quantile(AUC, 0.75, na.rm = TRUE)
+    )
+
+  # Compute overall statistics for C-index
+  all_c_indexes <- unlist(all_c_index_list)
+  overall_c_median <- median(all_c_indexes, na.rm = TRUE)
+  c_Q1 <- quantile(all_c_indexes, 0.25, na.rm = TRUE)
+  c_Q3 <- quantile(all_c_indexes, 0.75, na.rm = TRUE)
+
+  cat("Overall C-index Median:", overall_c_median, "\n")
+  cat("C-index 25th Percentile (Q1):", c_Q1, "\n")
+  cat("C-index 75th Percentile (Q3):", c_Q3, "\n\n")
+
+  return(list(
+    C_Index_List = all_c_index_list,
+    AUC_Stats = auc_stats
+  ))
+}
+```
+
+
+```{r}
+external_validation_time_varying_cox <- function(train_data, test_data) {
+  
+  # Extract predictors
+  predictors <- setdiff(names(train_data), c("start", "stop", "event", "ID"))
+
+  # Check for highly correlated variables and drop them
+  corr_matrix <- cor(train_data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
+  high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
+  high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
+  
+  if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
+    vars_to_remove <- unique(rownames(high_corr_pairs))
+    cat("Highly correlated variables detected. Dropping the following variables:\n")
+    print(vars_to_remove)
+    predictors <- setdiff(predictors, vars_to_remove)
+    train_data <- train_data %>% select(-all_of(vars_to_remove))
+    test_data <- test_data %>% select(-all_of(vars_to_remove))
+  }
+  
+  # Scale the predictors
+  train_data <- train_data %>%
+    mutate(across(everything(), as.numeric)) %>%
+    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+  test_data <- test_data %>%
+    mutate(across(everything(), as.numeric)) %>%
+    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+
+  formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + ")))
+
+  # Fit Cox proportional hazards model
+  cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron")
+  print(summary(cox_model))
+  # Calculate risk scores for the test set
+  risk_scores <- predict(cox_model, newdata = test_data, type = "risk")
+
+  # Compute C-index
+  c_index <- concordance(cox_model, newdata = test_data)$concordance
+
+  # Compute AUC for specified time points
+  times <- unique(test_data$stop)
+  times <- as.numeric(times)
+  times <- times[!is.na(times) & times > 0]  # Remove NA and non-positive times
+
+  auc_result <- timeROC(
+    T = test_data$stop,
+    delta = test_data$event,
+    marker = risk_scores,
+    cause = 1,
+    times = times
+  )
+
+  # Prepare AUC summary statistics
+  auc_summary <- data.frame(
+    Time = auc_result$times,
+    AUC = auc_result$AUC
+  )
+
+
+  # Print results
+  cat("C-index:", c_index, "\n")
+  print(auc_result)
+  
+
+  # Return results
+  return(list(
+    C_Index = c_index,
+    AUC_Stats = auc_summary
+  ))
+}
+
+```
+
+
+```{r}
+plot_auc_trajectory <- function(auc_stats) {
+  library(ggplot2)
+  
+  # Filter out rows with missing or invalid values
+  auc_stats <- auc_stats %>%
+    filter(!is.na(Median_AUC) & !is.na(Q1_AUC) & !is.na(Q3_AUC))
+  
+  ggplot(auc_stats, aes(x = Time, y = Median_AUC)) +
+    geom_line(linewidth = 1, color = "black") +  # Updated to use linewidth for line size
+    geom_point(size = 2, color = "black") +  # Points for Median AUC
+    geom_errorbar(aes(ymin = Q1_AUC, ymax = Q3_AUC), width = 0.2) +  # Error bars for Q1 and Q3
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "red", linewidth = 1) +  # Reference line at AUC = 0.5
+    theme_minimal() +
+    labs(
+      title = "Time-Varying AUC with IQR",
+      x = "Time",
+      y = "AUC"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 16),
+      axis.title.x = element_text(size = 14),
+      axis.title.y = element_text(size = 14),
+      axis.text = element_text(size = 12)
+    )
+}
+
+```
+
+# Full Model
+```{r}
+NACC_full_df <- read.csv("../preprocessed_data/longitudinal_NACC_full.csv")
+AIBL_full_df <- read.csv("../preprocessed_data/longitudinal_AIBL_full.csv")
+
+Cog_fts = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT")
+demo_fts = c("age", "sex", "edu","BMI")
+basic_fts = c("APOE4", "age")
+index_feature = c("start", "stop", "event", "ID")
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_full_results <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_NACC_full_results$AUC_Stats)
+
+```
+
+```{r}
+time_varying_APOE4_AIBL_full_results <- do_internal_cv_time_varying_cox(AIBL_full_df[, unique(c(basic_fts, index_feature))])
+```
+```{r}
+plot_auc_trajectory(time_varying_APOE4_AIBL_full_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_full_external_results <- external_validation_time_varying_cox(NACC_full_df[, unique(c(basic_fts, index_feature))], AIBL_full_df[, unique(c(basic_fts, index_feature))])
+```
+
+
+## Cog
+```{r}
+time_varying_cog_NACC_full_results <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_NACC_full_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_AIBL_full_results <- do_internal_cv_time_varying_cox(AIBL_full_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_AIBL_full_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_full_external_results <- external_validation_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, index_feature))], AIBL_full_df[, unique(c(Cog_fts, index_feature))])
+```
+
+## all Feature
+```{r}
+time_varying_all_NACC_full_results <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_NACC_full_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_AIBL_full_results <- do_internal_cv_time_varying_cox(AIBL_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_AIBL_full_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_external_full_results <- external_validation_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+# HC
+```{r}
+NACC_HC_df <- read.csv("../preprocessed_data/longitudinal_NACC_HC.csv")
+AIBL_HC_df <- read.csv("../preprocessed_data/longitudinal_AIBL_HC.csv")
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_HC_results <- do_internal_cv_time_varying_cox(NACC_HC_df[, unique(c(basic_fts, index_feature))])
+
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_NACC_HC_results$AUC_Stats)
+```
+
+
+```{r}
+time_varying_APOE4_AIBL_HC_results <- do_internal_cv_time_varying_cox(AIBL_HC_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_AIBL_HC_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_external_HC_results <- external_validation_time_varying_cox(NACC_HC_df[, unique(c(basic_fts, index_feature))], AIBL_HC_df[, unique(c(basic_fts, index_feature))])
+```
+
+
+## Cog
+```{r}
+time_varying_cog_NACC_HC_results <- do_internal_cv_time_varying_cox(NACC_HC_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_NACC_HC_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_AIBL_HC_results <- do_internal_cv_time_varying_cox(AIBL_HC_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_AIBL_HC_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_external_HC_results <- external_validation_time_varying_cox(NACC_HC_df[, unique(c(Cog_fts, index_feature))], AIBL_HC_df[, unique(c(Cog_fts, index_feature))])
+```
+
+## all Feature
+```{r}
+time_varying_all_NACC_HC_results <- do_internal_cv_time_varying_cox(NACC_HC_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_NACC_HC_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_AIBL_HC_results <- do_internal_cv_time_varying_cox(AIBL_HC_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_AIBL_HC_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_external_HC_results <- external_validation_time_varying_cox(NACC_HC_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_HC_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+
+# MCI
+```{r}
+NACC_MCI_df <- read.csv("../preprocessed_data/longitudinal_NACC_MCI.csv")
+AIBL_MCI_df <- read.csv("../preprocessed_data/longitudinal_AIBL_MCI.csv")
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_MCI_results <- do_internal_cv_time_varying_cox(NACC_MCI_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_NACC_MCI_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_AIBL_MCI_results <- do_internal_cv_time_varying_cox(AIBL_MCI_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_AIBL_MCI_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_external_MCI_results <- external_validation_time_varying_cox(NACC_MCI_df[, unique(c(basic_fts, index_feature))], AIBL_MCI_df[, unique(c(basic_fts, index_feature))])
+```
+
+
+## Cog
+```{r}
+time_varying_cog_NACC_MCI_results <- do_internal_cv_time_varying_cox(NACC_MCI_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_NACC_MCI_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_AIBL_MCI_results <- do_internal_cv_time_varying_cox(AIBL_MCI_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_AIBL_MCI_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_external_MCI_results <- external_validation_time_varying_cox(NACC_MCI_df[, unique(c(Cog_fts, index_feature))], AIBL_MCI_df[, unique(c(Cog_fts, index_feature))])
+```
+
+## all Feature
+```{r}
+time_varying_all_NACC_MCI_results <- do_internal_cv_time_varying_cox(NACC_MCI_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_NACC_MCI_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_AIBL_MCI_results <- do_internal_cv_time_varying_cox(AIBL_MCI_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_AIBL_MCI_results$AUC_Stats)
+```
+
+
+```{r}
+time_varying_cog_external_MCI_results <- external_validation_time_varying_cox(NACC_MCI_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_MCI_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+
+
+
+############# first 3 visits only #################
+
+#Full
+```{r}
+NACC_full_3_visits_df <- read.csv("../preprocessed_data/longitudinal_NACC_3_visits_full.csv")
+AIBL_full_3_visits_df <- read.csv("../preprocessed_data/longitudinal_AIBL_3_visits_full.csv")
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_full_3_results <- do_internal_cv_time_varying_cox(NACC_full_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_NACC_full_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_AIBL_full_3_results <- do_internal_cv_time_varying_cox(AIBL_full_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_AIBL_full_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_external_full_3_results <- external_validation_time_varying_cox(NACC_full_3_visits_df[, unique(c(basic_fts, index_feature))], AIBL_full_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+
+## Cog
+```{r}
+time_varying_cog_NACC_full_3_results <- do_internal_cv_time_varying_cox(NACC_full_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_NACC_full_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_AIBL_full_3_results <- do_internal_cv_time_varying_cox(AIBL_full_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_AIBL_full_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_external_full_3_results <- external_validation_time_varying_cox(NACC_full_3_visits_df[, unique(c(Cog_fts, index_feature))], AIBL_full_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+
+## all Feature
+```{r}
+time_varying_all_NACC_full_3_results <- do_internal_cv_time_varying_cox(NACC_full_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_NACC_full_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_AIBL_full_3_results <- do_internal_cv_time_varying_cox(AIBL_full_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_AIBL_full_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_external_full_3_results <- external_validation_time_varying_cox(NACC_full_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_full_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+
+
+
+# HC
+```{r}
+NACC_HC_3_visits_df <- read.csv("../preprocessed_data/longitudinal_NACC_3_visits_HC.csv")
+AIBL_HC_3_visits_df <- read.csv("../preprocessed_data/longitudinal_AIBL_3_visits_HC.csv")
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_HC_3_results <- do_internal_cv_time_varying_cox(NACC_HC_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_NACC_HC_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_AIBL_HC_3_results <- do_internal_cv_time_varying_cox(AIBL_HC_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_AIBL_HC_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_external_HC_3_results <- external_validation_time_varying_cox(NACC_HC_3_visits_df[, unique(c(basic_fts, index_feature))], AIBL_HC_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+
+## Cog
+```{r}
+time_varying_Cog_NACC_HC_3_results <- do_internal_cv_time_varying_cox(NACC_HC_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_Cog_NACC_HC_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_Cog_AIBL_HC_3_results <- do_internal_cv_time_varying_cox(AIBL_HC_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_Cog_AIBL_HC_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_Cog_external_HC_3_results <- external_validation_time_varying_cox(NACC_HC_3_visits_df[, unique(c(Cog_fts, index_feature))], AIBL_HC_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+## all Feature
+```{r}
+time_varying_all_NACC_HC_3_results <- do_internal_cv_time_varying_cox(NACC_HC_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_NACC_HC_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_AIBL_HC_3_results <- do_internal_cv_time_varying_cox(AIBL_HC_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_all_AIBL_HC_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_external_HC_3_results <- external_validation_time_varying_cox(NACC_HC_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_HC_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+
+
+
+# MCI
+```{r}
+NACC_MCI_3_visits_df <- read.csv("../preprocessed_data/longitudinal_NACC_3_visits_MCI.csv")
+AIBL_MCI_3_visits_df <- read.csv("../preprocessed_data/longitudinal_AIBL_3_visits_MCI.csv")
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_MCI_3_results <- do_internal_cv_time_varying_cox(NACC_MCI_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_NACC_MCI_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_AIBL_MCI_3_results <- do_internal_cv_time_varying_cox(AIBL_MCI_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_APOE4_AIBL_MCI_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_APOE4_external_MCI_3_results <- external_validation_time_varying_cox(NACC_MCI_3_visits_df[, unique(c(basic_fts, index_feature))], AIBL_MCI_3_visits_df[, unique(c(basic_fts, index_feature))])
+```
+
+
+## Cog
+```{r}
+time_varying_cog_NACC_MCI_3_results <- do_internal_cv_time_varying_cox(NACC_MCI_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_NACC_MCI_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_AIBL_MCI_3_results <- do_internal_cv_time_varying_cox(AIBL_MCI_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_AIBL_MCI_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_cog_external_MCI_3_results <- external_validation_time_varying_cox(NACC_MCI_3_visits_df[, unique(c(Cog_fts, index_feature))], AIBL_MCI_3_visits_df[, unique(c(Cog_fts, index_feature))])
+```
+
+## all Feature
+```{r}
+time_varying_all_NACC_MCI_3_results <- do_internal_cv_time_varying_cox(NACC_MCI_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_NACC_MCI_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_AIBL_MCI_3_results <- do_internal_cv_time_varying_cox(AIBL_MCI_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+```{r}
+plot_auc_trajectory(time_varying_cog_AIBL_MCI_3_results$AUC_Stats)
+```
+
+```{r}
+time_varying_all_external_MCI_3_results <- external_validation_time_varying_cox(NACC_MCI_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_MCI_3_visits_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))])
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
