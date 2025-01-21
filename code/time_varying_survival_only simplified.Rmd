@@ -1,0 +1,654 @@
+---
+title: "survival analysis"
+author: "Yihan Wang"
+date: "2025-01-04"
+output: word_document
+---
+
+```{r}
+rm(list = ls())
+```
+
+```{r}
+library(survival)
+library(broom)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(pROC)
+library(factoextra)
+library(survival)
+library(timeROC)
+library(missRanger)
+library(survminer)
+library(forcats)
+library(tidyr)
+library(tibble)
+set.seed(42)
+```
+
+
+############ Time-Varying Cox Model ###############
+
+```{r}
+prepare_for_survival_analysis_n_visits <- function(df, n) {
+  process_group <- function(group) {
+    ad_indices <- which(group$event == 1)
+    start_indices <- which(group$event == 0)[1]
+    
+    if (length(ad_indices) > 0) {
+      if (nrow(group) <= n) {
+        return(group)
+      } else {
+        first_ad_idx <- ad_indices[1]
+        first_ad_stop <- group$stop[first_ad_idx]
+        retained <- group[1:min(start_indices + n - 1, nrow(group)), ]
+        retained[nrow(retained), "event"] <- 1
+        retained[nrow(retained), "stop"] <- first_ad_stop
+        return(retained)
+      }
+    } else {
+      retained <- head(group, n)
+      retained[nrow(retained), "stop"] <- group$stop[nrow(group)]
+      return(retained)
+    }
+  }
+  
+  df_processed <- do.call(rbind, lapply(split(df, df$ID), process_group))
+  return(df_processed)
+}
+
+```
+
+```{r}
+do_internal_cv_time_varying_cox <- function(data, folds = 3, iterations = 10, shorten_visits = FALSE, n_visits = NULL) {
+  all_c_index_list <- list()
+  all_auc_results <- list()
+  all_significant_features <- c()
+
+  for (iter in 1:iterations) {
+    set.seed(iter)
+    # Split data into folds based on ID
+    unique_ids <- unique(data$ID)
+    fold_assignments <- sample(rep(1:folds, length.out = length(unique_ids)))
+    names(fold_assignments) <- unique_ids
+    c_index_list <- list()
+    auc_results <- list()
+
+    for (fold in 1:folds) {
+      train_ids <- unique_ids[fold_assignments != fold]
+      test_ids <- unique_ids[fold_assignments == fold]
+      train_data <- data[data$ID %in% train_ids, ]
+      test_data <- data[data$ID %in% test_ids, ]
+      
+      # If shorten_visits is TRUE, apply prepare_for_survival_analysis_n_visits
+      if (shorten_visits) {
+        if (is.null(n_visits)) {
+          stop("If shorten_visits is TRUE, n_visits must be specified.")
+        }
+        test_data <- prepare_for_survival_analysis_n_visits(test_data, n_visits)
+      }
+      
+      predictors <- setdiff(names(train_data), c("start", "stop", "event", "ID"))
+      formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + ")))
+      
+      # Check for highly correlated variables and drop them (using training data)
+      corr_matrix <- cor(train_data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
+      high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
+      high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
+
+      if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
+        vars_to_remove <- unique(rownames(high_corr_pairs))
+        predictors <- setdiff(predictors, vars_to_remove)
+        train_data <- train_data %>% select(-all_of(vars_to_remove))
+        test_data <- test_data %>% select(-all_of(vars_to_remove))
+      }
+
+      train_data <- train_data %>%
+        mutate(across(everything(), as.numeric)) %>%
+        mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+
+      test_data <- test_data %>%
+        mutate(across(everything(), as.numeric)) %>%
+        mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+      
+      # Fit Cox proportional hazards model
+      formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + ")))
+      cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron")
+      
+      ############
+      # Select significant features (p < 0.1)
+      significant_features <- rownames(summary(cox_model)$coefficients)[summary(cox_model)$coefficients[, "Pr(>|z|)"] <= 0.05]
+      all_significant_features <- c(all_significant_features, significant_features)  # Collect features
+      if (length(significant_features) == 0) {
+      cat("No significant predictors found. Using all predictors.\n")
+      significant_features <- predictors
+      }
+      formula_retrained <- as.formula(paste("Surv(start, stop, event) ~", paste(significant_features, collapse = " + ")))
+      cox_model_retrained <- coxph(formula_retrained, data = train_data, id = train_data$ID, ties = "efron")
+      
+      ###########
+      risk_scores <- predict(cox_model_retrained, newdata = test_data, type = "risk")
+      # Compute C-index
+      c_index <- concordance(cox_model_retrained, newdata = test_data)$concordance
+      c_index_list[[fold]] <- c_index
+
+      # Compute AUC for specified time points
+      times <- unique(test_data$stop)
+      times <- as.numeric(times)
+      times <- times[!is.na(times) & times > 0]  # Remove NA and non-positive times
+
+      auc_result <- timeROC(
+        T = test_data$stop,
+        delta = test_data$event,
+        marker = risk_scores,
+        cause = 1,
+        times = times
+      )
+      auc_results[[fold]] <- auc_result
+    }
+
+    all_c_index_list[[iter]] <- c_index_list
+    all_auc_results[[iter]] <- do.call(rbind, lapply(1:folds, function(fold) {
+      data.frame(
+        Iteration = iter,
+        Fold = fold,
+        Time = auc_results[[fold]]$times,
+        AUC = auc_results[[fold]]$AUC
+      )
+    }))
+
+  }
+
+  auc_summary <- do.call(rbind, all_auc_results)
+  auc_stats <- auc_summary %>%
+    group_by(Time) %>%
+    summarise(
+      Median_AUC = median(AUC, na.rm = TRUE),
+      Q1_AUC = quantile(AUC, 0.25, na.rm = TRUE),
+      Q3_AUC = quantile(AUC, 0.75, na.rm = TRUE)
+    )
+  
+  # Calculate overall statistics for AUC (across all iterations, folds, and time points)
+  overall_auc_median <- median(auc_summary$AUC, na.rm = TRUE)
+  overall_auc_q1 <- quantile(auc_summary$AUC, 0.25, na.rm = TRUE)
+  overall_auc_q3 <- quantile(auc_summary$AUC, 0.75, na.rm = TRUE)
+
+  # Compute overall statistics for C-index
+  all_c_indexes <- unlist(all_c_index_list)
+  overall_c_median <- median(all_c_indexes, na.rm = TRUE)
+  c_Q1 <- quantile(all_c_indexes, 0.25, na.rm = TRUE)
+  c_Q3 <- quantile(all_c_indexes, 0.75, na.rm = TRUE)
+
+  cat("Overall C-index Median:", overall_c_median, "\n")
+  cat("C-index 25th Percentile (Q1):", c_Q1, "\n")
+  cat("C-index 75th Percentile (Q3):", c_Q3, "\n\n")
+  
+  cat("Overall AUC Median:", overall_auc_median, "\n")
+  cat("AUC 25th Percentile (Q1):", overall_auc_q1, "\n")
+  cat("AUC 75th Percentile (Q3):", overall_auc_q3, "\n\n")
+  
+  significant_features_freq <- data.frame(
+    Feature = names(table(all_significant_features)),
+    Frequency = as.integer(table(all_significant_features))
+  ) %>% arrange(desc(Frequency))
+
+  return(list(
+    C_Index_List = all_c_index_list,
+    AUC_Stats = auc_stats,
+    Significant_Features_Freq = significant_features_freq
+  ))
+}
+```
+
+
+```{r}
+external_validation_time_varying_cox <- function(train_data, test_data, shorten_visits = FALSE, n_visits=NULL) {
+  
+  # If shorten_visits is TRUE, apply prepare_for_survival_analysis_n_visits
+    if (shorten_visits) {
+      if (is.null(n_visits)) {
+        stop("If shorten_visits is TRUE, n_visits must be specified.")
+      }
+      test_data <- prepare_for_survival_analysis_n_visits(test_data, n_visits)
+    }
+  
+  predictors <- setdiff(names(train_data), c("start", "stop", "event", "ID"))
+  corr_matrix <- cor(train_data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
+  high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
+  high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
+  
+  if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
+    vars_to_remove <- unique(rownames(high_corr_pairs))
+    cat("Highly correlated variables detected. Dropping the following variables:\n")
+    print(vars_to_remove)
+    predictors <- setdiff(predictors, vars_to_remove)
+    train_data <- train_data %>% select(-all_of(vars_to_remove))
+    test_data <- test_data %>% select(-all_of(vars_to_remove))
+  }
+  
+  train_data <- train_data %>%
+    mutate(across(everything(), as.numeric)) %>%
+    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+  test_data <- test_data %>%
+    mutate(across(everything(), as.numeric)) %>%
+    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+
+  formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + ")))
+
+  # Fit Cox proportional hazards model
+  cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron")
+  significant_features <- rownames(summary(cox_model)$coefficients)[summary(cox_model)$coefficients[, "Pr(>|z|)"] <= 0.1]
+
+  
+  if (length(significant_features) == 0) {
+  cat("No significant predictors found. Using all predictors.\n")
+  significant_features <- predictors
+  }else{
+    cat("Sigificant Feature selected:", significant_features, "\n")
+  }
+  formula_retrained <- as.formula(paste("Surv(start, stop, event) ~", paste(significant_features, collapse = " + ")))
+  cox_model_retrained <- coxph(formula_retrained, data = train_data, id = train_data$ID, ties = "efron")
+  print(summary(cox_model_retrained))
+  
+
+  risk_scores <- predict(cox_model_retrained, newdata = test_data, type = "risk")
+  c_index <- concordance(cox_model_retrained, newdata = test_data)$concordance
+  times <- unique(test_data$stop)
+  times <- as.numeric(times)
+  times <- times[!is.na(times) & times > 0]  # Remove NA and non-positive times
+
+  auc_result <- timeROC(
+    T = test_data$stop,
+    delta = test_data$event,
+    marker = risk_scores,
+    cause = 1,
+    times = times
+  )
+
+  auc_summary <- data.frame(
+    Time = auc_result$times,
+    AUC = auc_result$AUC
+  )
+  
+  overall_auc_median <- median(auc_summary$AUC, na.rm = TRUE)
+  overall_auc_q1 <- quantile(auc_summary$AUC, 0.25, na.rm = TRUE)
+  overall_auc_q3 <- quantile(auc_summary$AUC, 0.75, na.rm = TRUE)
+  cat("C-index:", c_index, "\n")
+  cat("Overall AUC Median:", overall_auc_median, "\n")
+  cat("AUC 25th Percentile (Q1):", overall_auc_q1, "\n")
+  cat("AUC 75th Percentile (Q3):", overall_auc_q3, "\n")
+
+  return(list(
+    C_Index = c_index,
+    AUC_Stats = auc_summary,
+    model_summary = summary(cox_model_retrained)
+  ))
+}
+
+```
+
+```{r}
+create_forest_plot <- function(summary_results, title = "Forest Plot for Cox Model", file_path_name=NULL) {
+  coefficients <- summary_results$coefficients
+  conf_intervals <- summary_results$conf.int
+  
+  forest_data <- data.frame(
+    Predictor = rownames(coefficients),
+    HR = conf_intervals[, "exp(coef)"],  # Hazard ratio
+    Lower_CI = conf_intervals[, "lower .95"],  # Lower 95% CI
+    Upper_CI = conf_intervals[, "upper .95"],  # Upper 95% CI
+    p_value = coefficients[, "Pr(>|z|)"]  # P-value
+  )
+  
+  forest_data <- forest_data %>%
+    arrange(HR)
+  forest_data$Predictor <- factor(forest_data$Predictor, levels = forest_data$Predictor)
+  
+  ggplot(forest_data, aes(y = Predictor, x = HR)) +
+    geom_point(size = 3) +
+    geom_errorbarh(aes(xmin = Lower_CI, xmax = Upper_CI), height = 0.2) +
+    geom_vline(xintercept = 1, linetype = "dashed", color = "red") +
+    theme_minimal() +
+    labs(
+      title = title,
+      x = "Hazard Ratio (HR)",
+      y = "Predictors"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14),
+      axis.title.x = element_text(size = 12),
+      axis.title.y = element_text(size = 12),
+      axis.text = element_text(size = 10),
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank()   # Remove minor grid lines
+    )
+
+
+  ggsave(file_path_name, width = 10, height = 7, device = "pdf")
+
+
+}
+
+```
+
+
+```{r}
+missranger_impute <- function(df, columns_ignores) {
+  if (!is.data.frame(df)) {
+    stop("The input must be a dataframe.")
+  }
+  if (!all(columns_ignores %in% colnames(df))) {
+    stop("Some ID columns specified are not present in the dataframe.")
+  }
+
+
+  ignore_cols <- df[, columns_ignores, drop = FALSE]
+  data_to_impute <- df[, !colnames(df) %in% columns_ignores, drop = FALSE]
+  set.seed(42)
+  imputed_data <- missRanger(data_to_impute, pmm.k = 10)
+  result <- cbind(ignore_cols, imputed_data)
+  return(result)
+}
+```
+
+```{r}
+plot_auc_trajectory_group <- function(auc_stats_list, labels, validation_auc_stats = NULL, validation_label = "Validation", title_name = "", output_file = NULL) {
+  combined_auc_stats <- do.call(rbind, lapply(1:length(auc_stats_list), function(i) {
+    auc_stats_list[[i]] %>%
+      filter(!is.na(Median_AUC) & !is.na(Q1_AUC) & !is.na(Q3_AUC)) %>%
+      mutate(Model = labels[i])  # Add a label column for the model
+  }))
+
+  # If validation AUC stats are provided, format them and add to the combined data
+  if (!is.null(validation_auc_stats)) {
+    validation_auc_stats <- validation_auc_stats %>%
+      filter(!is.na(AUC)) %>%
+      rename(Median_AUC = AUC) %>%  # Rename AUC column for consistency
+      mutate(
+        Q1_AUC = NA,  # Validation doesn't have Q1_AUC
+        Q3_AUC = NA,  # Validation doesn't have Q3_AUC
+        Model = validation_label  # Add label for validation
+      )
+
+    combined_auc_stats <- bind_rows(combined_auc_stats, validation_auc_stats)
+  }
+
+  # Create the plot
+  auc_plot <- ggplot(combined_auc_stats, aes(x = Time, y = Median_AUC, color = Model, group = Model)) +
+    geom_line(linewidth = 1) +  # Line for Median AUC
+    geom_point(data = combined_auc_stats %>% filter(!is.na(Q1_AUC)), size = 2) +  # Points only for models with IQR
+    geom_errorbar(data = combined_auc_stats %>% filter(!is.na(Q1_AUC)), aes(ymin = Q1_AUC, ymax = Q3_AUC), width = 0.2) +  # Error bars for models with IQR
+    geom_line(data = validation_auc_stats, linewidth = 1, linetype = "dotted") +  # Dotted line for validation data
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "red", linewidth = 1) +  # Reference line at AUC = 0.5
+    theme_minimal() +
+    labs(
+      title = paste0("Time-Varying AUC with IQR ", title_name),
+      x = "Time",
+      y = "AUC",
+      color = "Model"  # Legend title
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(size = 14),
+      axis.title.y = element_text(size = 14),
+      axis.text = element_text(size = 12),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 10),
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank()   # Remove minor grid lines
+    )
+
+  # Save the plot as a PDF if an output file is provided
+  if (!is.null(output_file)) {
+    ggsave(output_file, plot = auc_plot, device = "pdf", width = 10, height = 6)
+  }
+
+  # Return the plot
+  return(auc_plot)
+}
+
+```
+
+```{r}
+plot_auc_trajectory_single <- function(auc_stats_list, labels, title_name = "", output_file = NULL) {
+  # Combine AUC stats from all models into a single dataframe
+  combined_auc_stats <- do.call(rbind, lapply(1:length(auc_stats_list), function(i) {
+    auc_stats_list[[i]] %>%
+      filter(!is.na(AUC)) %>%
+      mutate(Model = labels[i])  # Add a label column for the model
+  }))
+
+  # Create the plot
+  auc_plot <- ggplot(combined_auc_stats, aes(x = Time, y = AUC, color = Model, group = Model)) +
+    geom_line(linewidth = 1) +  # Line for AUC
+    geom_point(size = 2) +  # Points for AUC
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "red", linewidth = 1) +  # Reference line at AUC = 0.5
+    theme_minimal() +
+    labs(
+      title = paste0("Time-Varying AUC ", title_name),
+      x = "Time",
+      y = "AUC",
+      color = "Model"  # Legend title
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 12),
+      axis.title.x = element_text(size = 14),
+      axis.title.y = element_text(size = 14),
+      axis.text = element_text(size = 12),
+      legend.title = element_text(size = 14),
+      legend.text = element_text(size = 10),
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank()   # Remove minor grid lines
+    )
+
+  # Save the plot as a PDF if an output file is provided
+  if (!is.null(output_file)) {
+    ggsave(output_file, plot = auc_plot, device = "pdf", width = 10, height = 6)
+  }
+
+  # Return the plot
+  return(auc_plot)
+}
+
+
+
+```
+
+```{r}
+plot_stacked_feature_importance <- function(dfs, labels, colors, file_path_name) {
+  merged_df <- dfs[[1]] %>% rename(!!labels[1] := Frequency) %>% column_to_rownames(var = "Feature")
+  for (i in 2:length(dfs)) {
+    merged_df <- merge(
+      merged_df,
+      dfs[[i]] %>% rename(!!labels[i] := Frequency) %>% column_to_rownames(var = "Feature"),
+      by = "row.names",
+      all = TRUE
+    )
+    rownames(merged_df) <- merged_df$Row.names
+    merged_df <- merged_df[,-1]
+  }
+  merged_df[is.na(merged_df)] <- 0
+  merged_df$Total <- rowSums(merged_df)
+  top_features_df <- merged_df %>% arrange(desc(Total)) %>% head(20) %>% select(-Total)
+  top_features_long <- top_features_df %>% 
+    rownames_to_column(var = "Feature") %>% 
+    pivot_longer(-Feature, names_to = "Model", values_to = "Frequency")
+  ggplot(top_features_long, aes(x = Frequency, y = fct_reorder(Feature, Frequency, .fun = sum), fill = Model)) +
+    geom_bar(stat = "identity", position = "stack") +
+    theme_minimal() +
+    labs(
+      title = "Top Feature Frequency for Time-Varying Cox Model",
+      y = "Feature Name",  # Changed from x to y since coord_flip() switches them
+      x = "Frequency (Count)",  # Changed from y to x since coord_flip() switches them
+      fill = "Model"
+      
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 15),
+      axis.title.x = element_text(size = 11),
+      axis.title.y = element_text(size = 11),
+      axis.text = element_text(size = 11),
+      legend.title = element_text(size = 12),
+      legend.text = element_text(size = 12),
+      panel.grid.major = element_blank(),  # Remove major grid lines
+      panel.grid.minor = element_blank()   # Remove minor grid lines
+    ) +
+    scale_fill_manual(values = colors) +
+    guides(fill = guide_legend(reverse = TRUE)) 
+
+  ggsave(file_path_name, width = 10, height = 7, device = "pdf")
+}
+```
+
+
+```{r}
+NACC_full_df <- read.csv("../preprocessed_data/longitudinal_NACC_full.csv")
+AIBL_full_df <- read.csv("../preprocessed_data/longitudinal_AIBL_full.csv")
+
+Cog_fts = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT")
+demo_fts = c("age", "sex", "edu","BMI")
+basic_fts = c("APOE4", "age")
+index_feature = c("start", "stop", "event", "ID")
+
+feature_set2 = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT", "age", "sex", "edu","BMI")
+```
+
+
+```{r}
+AIBL_full_df_imputed<- missranger_impute(AIBL_full_df, c(c(index_feature), "Classification"))
+```
+
+## APOE4 + age
+```{r}
+time_varying_APOE4_NACC_full_results1 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = FALSE)
+```
+
+
+```{r}
+time_varying_APOE4_NACC_full_results2 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+time_varying_APOE4_NACC_full_results3 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+time_varying_APOE4_NACC_full_results4 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=1)
+```
+
+
+## Full feature without APOE4
+```{r}
+time_varying_ft2_NACC_full_results1 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], folds = 3, iterations=10, shorten_visits = FALSE)
+```
+
+```{r}
+time_varying_ft2_NACC_full_results2 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+
+```{r}
+time_varying_ft2_NACC_full_results3 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+time_varying_ft2_NACC_full_results4 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=1)
+```
+```{r}
+time_varying_ft2_full_external_results1 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], AIBL_full_df_imputed[, unique(c(feature_set2, index_feature))], shorten_visits = FALSE)
+```
+
+```{r}
+time_varying_ft2_full_external_results2 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], AIBL_full_df_imputed[, unique(c(feature_set2, index_feature))], shorten_visits = TRUE, n_visits = 3)
+```
+
+
+```{r}
+time_varying_ft2_full_external_results3 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], AIBL_full_df_imputed[, unique(c(feature_set2, index_feature))], shorten_visits = TRUE, n_visits = 2)
+```
+
+```{r}
+time_varying_ft2_full_external_results4 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(feature_set2, index_feature))], AIBL_full_df_imputed[, unique(c(feature_set2, index_feature))], shorten_visits = TRUE, n_visits = 1)
+```
+
+
+
+
+
+## all Feature
+```{r}
+time_varying_all_NACC_full_results1 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = FALSE)
+```
+
+```{r}
+time_varying_all_NACC_full_results2 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+time_varying_all_NACC_full_results3 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+time_varying_all_NACC_full_results4 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=1)
+```
+
+
+```{r}
+time_varying_all_external_full_results1 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_full_df_imputed[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], shorten_visits = FALSE)
+```
+
+```{r}
+time_varying_all_external_full_results2 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_full_df_imputed[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], shorten_visits = TRUE, n_visits = 3)
+```
+
+```{r}
+time_varying_all_external_full_results3 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_full_df_imputed[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], shorten_visits = TRUE, n_visits = 2)
+```
+
+```{r}
+time_varying_all_external_full_results4 <- external_validation_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], AIBL_full_df_imputed[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], shorten_visits = TRUE, n_visits = 1)
+```
+
+
+
+
+```{r}
+plot_auc_trajectory_group(list(time_varying_all_NACC_full_results1$AUC_Stats, time_varying_all_NACC_full_results2$AUC_Stats, time_varying_all_NACC_full_results3$AUC_Stats, time_varying_all_NACC_full_results4$AUC_Stats), c("full visits", "3-visits", "2-visits", "1-visits"), title_name = "for all features on Full longitudinal data", output_file = "../results/time-varying AUC NACC.pdf")
+
+```
+
+
+```{r}
+plot_auc_trajectory_single(list(time_varying_all_external_full_results1$AUC_Stats, time_varying_all_external_full_results2$AUC_Stats, time_varying_all_external_full_results3$AUC_Stats, time_varying_all_external_full_results4$AUC_Stats), c("full visits", "3-visits", "2-visits", "1-visits"), title_name = " ", output_file = "../results/time-varying AUC external.pdf")
+
+```
+
+```{r}
+auc_plot <- ggplot(time_varying_all_NACC_full_results1$Significant_Features_Freq, aes(x = Frequency, y = reorder(Feature, Frequency))) +
+  geom_bar(stat = "identity", fill = "#619cff") +
+  theme_minimal() +
+  labs(title = "Feature Frequency", x = "Frequency", y = "Feature") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank()  # Remove all grid lines
+  )
+
+# Save the plot as a PDF
+ggsave("../results/feature_importance_plot_all_visits_test.pdf", plot = auc_plot, device = "pdf", width = 8, height = 6)
+
+# Print the plot (optional, to view in R)
+print(auc_plot)
+```
+```{r}
+create_forest_plot(time_varying_all_external_full_results1$model_summary, "Forest Plot for Time-Varying Cox Model", "../results/forest_plot_all_visits.pdf")
+```
+
+```{r}
+
+
+```
+
+
