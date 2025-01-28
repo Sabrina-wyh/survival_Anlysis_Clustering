@@ -256,10 +256,10 @@ plot_centroid_trajectories <- function(df, risk_group, selected_features_traject
 
 
 ```{r}
-NACC_full_df <- read.csv("../preprocessed_data/longitudinal_NACC_AD.csv")
-AIBL_full_df <- read.csv("../preprocessed_data/longitudinal_AIBL_AD.csv")
+NACC_full_df <- read.csv("../preprocessed_data/longitudinal_NACC_MCI.csv")
+AIBL_full_df <- read.csv("../preprocessed_data/longitudinal_AIBL_MCI.csv")
 
-selected_features = c("CDR_SB","memory_recall2", "animal", "APOE4", "edu", "MMSE")
+selected_features = c("GDS","memory_recall2", "animal", "age", "edu", "MMSE")
 
 index_feature = c("start", "stop", "event", "ID")
 ```
@@ -290,9 +290,9 @@ analyze_risk_groups(NACC_full_df, risk_group_train)
 
 
 ```{r}
-selected_features_trajectories = c("CDR_SB","memory_recall2", "animal", "MMSE")
+selected_features_trajectories = c("GDS","memory_recall2", "animal", "MMSE")
 
-centroid_trajectory_train = plot_centroid_trajectories(NACC_full_df, risk_group_train, selected_features_trajectories, "../results/feature_trajectories_NACC.pdf")
+centroid_trajectory_train = plot_centroid_trajectories(NACC_full_df, risk_group_train, selected_features_trajectories, "../results/feature_trajectories_NACC MCI.pdf")
 ```
 
 
@@ -324,7 +324,7 @@ analyze_risk_groups(AIBL_full_df_imputed, risk_group_test)
 ```
 
 ```{r}
-centroid_trajectory_test = plot_centroid_trajectories(AIBL_full_df_imputed, risk_group_test, selected_features_trajectories, "../results/feature_trajectories_AIBL.pdf")
+centroid_trajectory_test = plot_centroid_trajectories(AIBL_full_df_imputed, risk_group_test, selected_features_trajectories, "../results/feature_trajectories_AIBL_MCI.pdf")
 ```
 
 
@@ -347,10 +347,7 @@ risk_group_test
 ```
 
 
-```{r}
 
-
-```
 
 
 
