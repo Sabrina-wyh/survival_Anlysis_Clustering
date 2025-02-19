@@ -1,0 +1,486 @@
+---
+title: "model_performance"
+author: "Yihan Wang"
+date: "2025-02-13"
+output: pdf_document
+---
+
+```{r}
+rm(list = ls())
+library(survival)
+library(broom)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(pROC)
+library(factoextra)
+library(timeROC)
+library(missRanger)
+library(survminer)
+library(forcats)
+library(tidyr)
+library(tibble)
+library(penalized)
+library(MASS)
+library(glmnet)
+library(conflicted)
+library(gridExtra)
+conflict_prefer("select", "dplyr")
+conflicts_prefer(dplyr::filter)
+set.seed(42)
+```
+
+```{r}
+source("time-varying-utility.R")
+```
+
+```{r}
+NACC_full_df_MCI <- read.csv("../preprocessed_data/longitudinal_NACC_MCI.csv")
+AIBL_full_df_MCI <- read.csv("../preprocessed_data/longitudinal_AIBL_MCI.csv")
+
+Cog_fts_MCI = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT")
+demo_fts_MCI = c("age", "sex", "edu","BMI", "blood_pressure_diastolic", "blood_pressure_systolic", "Heart_rate")
+basic_fts_MCI = c("APOE4", "age")
+index_feature_MCI = c("start", "stop", "event", "ID")
+```
+
+```{r}
+AIBL_full_df_imputed_MCI<- missranger_impute(AIBL_full_df_MCI, c(c(index_feature_MCI), "Classification"))
+```
+
+
+
+# internal validation
+## time varying cox
+### APOE4 + age
+```{r}
+time_varying_APOE4_NACC_full_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10)
+```
+
+
+
+```{r}
+time_varying_APOE4_NACC_full_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+time_varying_APOE4_NACC_full_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+```{r}
+time_varying_APOE4_NACC_full_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=1)
+```
+
+```{r}
+plot_auc_trajectory_group(list(time_varying_APOE4_NACC_full_results1_MCI$AUC_Stats, time_varying_APOE4_NACC_full_results2_MCI$AUC_Stats, time_varying_APOE4_NACC_full_results3_MCI$AUC_Stats, time_varying_APOE4_NACC_full_results4_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits", "1-visits"), title_name = " ", output_file = "../results/MCI time-varying AUC internal APOE4.pdf")
+```
+
+### all Feature
+```{r}
+time_varying_all_NACC_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10)
+```
+
+
+
+```{r}
+time_varying_all_NACC_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+time_varying_all_NACC_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+time_varying_all_NACC_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, shorten_visits = TRUE, n_visits=1)
+```
+
+```{r}
+plot_auc_trajectory_group(list(time_varying_all_NACC_results1_MCI$AUC_Stats, time_varying_all_NACC_results2_MCI$AUC_Stats, time_varying_all_NACC_results3_MCI$AUC_Stats, time_varying_all_NACC_results4_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits", "1-visits"), title_name = " ", output_file = "../results/MCI time-varying AUC internal all fts.pdf")
+```
+
+### Feature Selection - AIC
+```{r}
+time_varying_all_NACC_AIC_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE)
+num_ft_MCI = round(sum(time_varying_all_NACC_AIC_results1_MCI$Significant_Features_Freq$Frequency) / 50)
+final_selected_feature_MCI = head(time_varying_all_NACC_AIC_results1_MCI$Significant_Features_Freq$Feature, num_ft_MCI)
+```
+
+
+
+```{r}
+time_varying_all_NACC_AIC_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+time_varying_all_NACC_AIC_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+time_varying_all_NACC_AIC_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE, shorten_visits = TRUE, n_visits=1)
+```
+
+```{r}
+filtered_data_MCI <- time_varying_all_NACC_AIC_results1_MCI$Significant_Features_Freq %>%
+  filter(Feature != "frailty(ID)")
+
+ft_plot_MCI <- ggplot(filtered_data_MCI, aes(x = Frequency, y = reorder(Feature, Frequency))) +
+  geom_bar(stat = "identity", fill = "#619cff") +
+  theme_minimal() +
+  labs(title = "Feature Frequency", x = "Frequency", y = "Feature") +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank()  # Remove all grid lines
+  )
+
+# Save the plot as a PDF
+ggsave("../results/MCI feature_importance_plot.pdf", plot = ft_plot_MCI, device = "pdf", width = 10, height = 5)
+
+print(ft_plot_MCI)
+```
+
+```{r}
+plot_auc_trajectory_group(list(time_varying_all_NACC_AIC_results1_MCI$AUC_Stats, time_varying_all_NACC_AIC_results2_MCI$AUC_Stats, time_varying_all_NACC_AIC_results3_MCI$AUC_Stats, time_varying_all_NACC_AIC_results4_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits", "1-visits"), title_name = " ", output_file = "../results/MCI time-varying AUC internal AIC.pdf")
+```
+
+## aggregated normal cox
+### APOE + Age
+```{r}
+aggregate_APOE4_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=10)
+```
+
+
+
+```{r}
+aggregate_APOE4_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+aggregate_APOE4_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+plot_auc_trajectory_group(list(aggregate_APOE4_NACC_results1_MCI$AUC_Stats, aggregate_APOE4_NACC_results2_MCI$AUC_Stats, aggregate_APOE4_NACC_results3_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits"), title_name = " ", output_file = "../results/MCI agg-cox AUC internal APOE4.pdf")
+```
+
+
+### all features
+```{r}
+static_fts_MCI = c("age", "sex", "edu", "APOE4")
+dynamic_fts_MCI = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT","BMI", "blood_pressure_diastolic", "blood_pressure_systolic", "Heart_rate")
+
+
+aggregate_all_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10)
+```
+
+
+
+```{r}
+aggregate_all_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+aggregate_all_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+plot_auc_trajectory_group(list(aggregate_all_NACC_results1_MCI$AUC_Stats, aggregate_all_NACC_results2_MCI$AUC_Stats, aggregate_all_NACC_results3_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits"), title_name = " ", output_file = "../results/MCI agg-cox AUC internal all fts.pdf")
+```
+
+### Feature Selection - AIC
+```{r}
+aggregate_fts_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10,feature_selection = TRUE)
+```
+
+```{r}
+num_ft_agg_MCI = round(sum(aggregate_fts_NACC_results1_MCI$Significant_Features_Freq$Frequency) / 50)
+final_selected_feature_agg_MCI = head(aggregate_fts_NACC_results1_MCI$Significant_Features_Freq$Feature, num_ft_agg_MCI)
+print(final_selected_feature_agg_MCI)
+```
+
+```{r}
+aggregate_fts_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+```
+
+```{r}
+aggregate_fts_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+```
+
+```{r}
+plot_auc_trajectory_group(list(aggregate_fts_NACC_results1_MCI$AUC_Stats, aggregate_fts_NACC_results2_MCI$AUC_Stats, aggregate_fts_NACC_results3_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits"), title_name = " ", output_file = "../results/MCI agg-cox AUC internal AIC.pdf")
+```
+
+## baseline normal cox (initial visit)
+```{r}
+NACC_baseline_df_MCI = prepare_for_survival_analysis_n_visits(NACC_full_df_MCI, n = 1)
+NACC_baseline_df_MCI$time = NACC_baseline_df_MCI$stop - NACC_baseline_df_MCI$start
+```
+
+```{r}
+baseline_APOE4_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, c("APOE4", "age", "event", "time", "ID")], folds = 5, iterations=10)
+```
+
+```{r}
+baseline_all_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10)
+```
+
+```{r}
+baseline_fts_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10, feature_selection = TRUE)
+```
+
+
+
+## baseline normal cox (last visit)
+```{r}
+NACC_baseline_df2_MCI = prepare_for_survival_analysis_n_visits_backward(NACC_full_df_MCI, n = 1)
+NACC_baseline_df2_MCI$time = NACC_baseline_df2_MCI$stop - NACC_baseline_df2_MCI$start
+```
+
+```{r}
+baseline_APOE4_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, c("APOE4", "age", "event", "time", "ID")], folds = 5, iterations=10)
+```
+
+```{r}
+baseline_all_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10)
+```
+
+```{r}
+baseline_fts_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10, feature_selection = TRUE)
+```
+
+
+
+##########################################################################
+# External Validation
+## time-varying
+```{r}
+print(final_selected_feature_MCI)
+```
+
+```{r}
+selected_features_MCI = c("memory_recall2", "GDS", "edu", "age", "animal", "MMSE")
+time_varying_external_results1_MCI <- do_external_time_varying_cox(NACC_full_df_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], AIBL_full_df_imputed_MCI[, unique(c(selected_features_MCI, index_feature_MCI))])
+```
+
+```{r}
+create_forest_plot(time_varying_external_results1_MCI$model_summary, "Forest Plot for Time-Varying Cox Model", "../results/MCI forest_plot.pdf")
+```
+
+
+
+```{r}
+time_varying_external_results2_MCI <- do_external_time_varying_cox(NACC_full_df_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], AIBL_full_df_imputed_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], shorten_visits = TRUE, n_visits = 3)
+```
+
+```{r}
+time_varying_external_results3_MCI <- do_external_time_varying_cox(NACC_full_df_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], AIBL_full_df_imputed_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], shorten_visits = TRUE, n_visits = 2)
+```
+
+```{r}
+time_varying_external_results4_MCI <- do_external_time_varying_cox(NACC_full_df_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], AIBL_full_df_imputed_MCI[, unique(c(selected_features_MCI, index_feature_MCI))], shorten_visits = TRUE, n_visits = 1)
+```
+
+
+```{r}
+plot_auc_trajectory_single(list(time_varying_external_results1_MCI$AUC_Stats, time_varying_external_results2_MCI$AUC_Stats, time_varying_external_results3_MCI$AUC_Stats, time_varying_external_results4_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits", "1-visits"), title_name = " ", output_file = "../results/MCI time-varying AUC external.pdf")
+```
+
+## aggregated normal cox
+
+```{r}
+static_fts2_MCI = c("edu", "APOE4","age")
+# dynamic_fts2 = c("CDR_SB", "MMSE",  "memory_recall2", "age",  "animal", "Heart_rate", "blood_pressure_diastolic", "GDS")
+dynamic_fts2_MCI = c("CDR_SB", "MMSE",  "memory_recall2", "animal", "GDS")
+
+aggregate_fts_AIBL_results1_MCI <- do_external_normal_cox(NACC_full_df_MCI, AIBL_full_df_imputed_MCI, static_fts2_MCI, dynamic_fts2_MCI)
+```
+
+
+
+```{r}
+aggregate_fts_AIBL_results2_MCI <- do_external_normal_cox(NACC_full_df_MCI, AIBL_full_df_imputed_MCI, static_fts2_MCI, dynamic_fts2_MCI, shorten_visits = TRUE, n_visits = 3)
+```
+
+```{r}
+aggregate_fts_AIBL_results3_MCI <- do_external_normal_cox(NACC_full_df_MCI, AIBL_full_df_imputed_MCI, static_fts2_MCI, dynamic_fts2_MCI, shorten_visits = TRUE, n_visits = 2)
+```
+
+```{r}
+plot_auc_trajectory_single(list(aggregate_fts_AIBL_results1_MCI$AUC_Stats, aggregate_fts_AIBL_results2_MCI$AUC_Stats, aggregate_fts_AIBL_results3_MCI$AUC_Stats), c("full visits", "3-visits", "2-visits"), title_name = " ", output_file = "../results/MCI aggre-cox AUC external.pdf")
+```
+
+
+## baseline normal cox (initial visit)
+```{r}
+AIBL_baseline_df_MCI = prepare_for_survival_analysis_n_visits(AIBL_full_df_imputed_MCI, n = 1)
+AIBL_baseline_df_MCI$time = AIBL_baseline_df_MCI$stop - AIBL_baseline_df_MCI$start
+
+```
+
+
+```{r}
+baseline_AIBL_results1_MCI <- do_external_normal_cox(NACC_baseline_df_MCI[, unique(c(selected_features_MCI, c("event", "time", "ID") ))], AIBL_baseline_df_MCI[, unique(c(selected_features_MCI, c("event", "time", "ID") ))])
+```
+
+
+
+```{r}
+plot_auc_trajectory_group(list(baseline_all_NACC_results_MCI$AUC_Stats, baseline_APOE4_NACC_results_MCI$AUC_Stats, baseline_fts_NACC_results_MCI$AUC_Stats), c("full features", "APOE+age", "selected features"), validation_auc_stats = baseline_AIBL_results1_MCI$AUC_Stats, validation_label = "External (selected features)", title_name = " ", output_file = "../results/MCI baseline_cox_init AUC.pdf")
+
+```
+
+## baseline normal cox (last visit)
+```{r}
+AIBL_baseline_df2_MCI = prepare_for_survival_analysis_n_visits_backward(AIBL_full_df_imputed_MCI, n = 1)
+AIBL_baseline_df2_MCI$time = AIBL_baseline_df2_MCI$stop - AIBL_baseline_df2_MCI$start
+```
+
+
+```{r}
+baseline_AIBL_results2_MCI <- do_external_normal_cox(NACC_baseline_df2_MCI[, unique(c(selected_features_MCI, c("event", "time", "ID") ))], AIBL_baseline_df2_MCI[, unique(c(selected_features_MCI, c("event", "time", "ID") ))])
+```
+
+
+
+```{r}
+plot_auc_trajectory_group(list(baseline_all_NACC_results2_MCI$AUC_Stats, baseline_APOE4_NACC_results2_MCI$AUC_Stats, baseline_fts_NACC_results2_MCI$AUC_Stats), c("full features", "APOE+age", "selected features"), validation_auc_stats = baseline_AIBL_results2_MCI$AUC_Stats, validation_label = "External (selected features)", title_name = " ", output_file = "../results/MCI baseline_cox_last AUC.pdf")
+
+```
+
+
+
+# final plots
+```{r}
+boxplot_c_index_df_MCI <- data.frame(model = character(), feature_set = character(), value = numeric(), stringsAsFactors = FALSE)
+
+
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[init]", "APOE4+age (internal-NACC)", baseline_APOE4_NACC_results_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[last]", "APOE4+age (internal-NACC)", baseline_APOE4_NACC_results2_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "aggregated-cox", "APOE4+age (internal-NACC)", aggregate_APOE4_NACC_results1_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "time-cox(FADRS-MCI)", "APOE4+age (internal-NACC)", time_varying_APOE4_NACC_full_results1_MCI$C_Index_List)
+
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[init]", "full features (internal-NACC)", baseline_all_NACC_results_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[last]", "full features (internal-NACC)", baseline_all_NACC_results2_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "aggregated-cox", "full features (internal-NACC)", aggregate_all_NACC_results1_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "time-cox(FADRS-MCI)", "full features (internal-NACC)", time_varying_all_NACC_results1_MCI$C_Index_List)
+
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[init]", "AIC feature selection (internal-NACC)", baseline_fts_NACC_results_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[last]", "AIC feature selection (internal-NACC)", baseline_fts_NACC_results2_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "aggregated-cox", "AIC feature selection (internal-NACC)", aggregate_fts_NACC_results1_MCI$C_Index_List)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "time-cox(FADRS-MCI)", "AIC feature selection (internal-NACC)", time_varying_all_NACC_AIC_results1_MCI$C_Index_List)
+
+
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[init]", "selected feature set (external-AIBL)", baseline_AIBL_results1_MCI$C_Index)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "baseline-cox[last]", "selected feature set (external-AIBL)", baseline_AIBL_results2_MCI$C_Index)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "aggregated-cox", "selected feature set (external-AIBL)", aggregate_fts_AIBL_results1_MCI$C_Index)
+boxplot_c_index_df_MCI = add_data(boxplot_c_index_df_MCI, "time-cox(FADRS-MCI)", "selected feature set (external-AIBL)", time_varying_external_results1_MCI$C_Index)
+
+boxplot_c_index_df_MCI$model <- factor(boxplot_c_index_df_MCI$model, levels = c("baseline-cox[init]", "baseline-cox[last]", "aggregated-cox", "time-cox(FADRS-MCI)"))
+boxplot_c_index_df_MCI$feature_set <- factor(boxplot_c_index_df_MCI$feature_set, levels = c("APOE4+age (internal-NACC)", "full features (internal-NACC)", "AIC feature selection (internal-NACC)", "selected feature set (external-AIBL)"))
+
+boxplot_c_index_df_MCI <- boxplot_c_index_df_MCI %>% filter(is.finite(value))
+```
+
+
+```{r}
+plot_boxplot(boxplot_c_index_df_MCI, "C-index", "../results/MCI boxplot_c_index.pdf")
+
+```
+
+
+```{r}
+boxplot_auc_index_df_MCI <- data.frame(model = character(), feature_set = character(), value = numeric(), stringsAsFactors = FALSE)
+
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[init]", "APOE4+age (internal-NACC)", na.omit(baseline_APOE4_NACC_results_MCI$AUC_list))
+
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[init]", "full features (internal-NACC)", na.omit(baseline_all_NACC_results_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[init]", "AIC feature selection (internal-NACC)", na.omit(baseline_fts_NACC_results_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[init]", "selected feature set (external-AIBL)", na.omit(baseline_AIBL_results1_MCI$AUC_list))
+
+
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[last]", "APOE4+age (internal-NACC)", na.omit(baseline_APOE4_NACC_results2_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[last]", "full features (internal-NACC)", na.omit(baseline_all_NACC_results2_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[last]", "AIC feature selection (internal-NACC)", na.omit(baseline_fts_NACC_results2_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "baseline-cox[last]", "selected feature set (external-AIBL)", na.omit(baseline_AIBL_results2_MCI$AUC_list))
+
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "aggregated-cox", "APOE4+age (internal-NACC)", na.omit(aggregate_APOE4_NACC_results1_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "aggregated-cox", "full features (internal-NACC)", na.omit(aggregate_all_NACC_results1_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "aggregated-cox", "AIC feature selection (internal-NACC)", na.omit(aggregate_fts_NACC_results1_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "aggregated-cox", "selected feature set (external-AIBL)", na.omit(aggregate_fts_AIBL_results1_MCI$AUC_list))
+
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "time-cox(FADRS-MCI)", "APOE4+age (internal-NACC)", na.omit(time_varying_APOE4_NACC_full_results1_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "time-cox(FADRS-MCI)", "full features (internal-NACC)", na.omit(time_varying_all_NACC_results1_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "time-cox(FADRS-MCI)", "AIC feature selection (internal-NACC)", na.omit(time_varying_all_NACC_AIC_results1_MCI$AUC_list))
+boxplot_auc_index_df_MCI = add_data(boxplot_auc_index_df_MCI, "time-cox(FADRS-MCI)", "selected feature set (external-AIBL)", na.omit(time_varying_external_results1_MCI$AUC_list))
+
+boxplot_auc_index_df_MCI$model <- factor(boxplot_auc_index_df_MCI$model, levels = c("baseline-cox[init]", "baseline-cox[last]", "aggregated-cox", "time-cox(FADRS-MCI)"))
+boxplot_auc_index_df_MCI$feature_set <- factor(boxplot_auc_index_df_MCI$feature_set, levels = c("APOE4+age (internal-NACC)", "full features (internal-NACC)", "AIC feature selection (internal-NACC)", "selected feature set (external-AIBL)"))
+
+boxplot_auc_index_df_MCI <- boxplot_auc_index_df_MCI %>% filter(is.finite(value))
+```
+
+```{r}
+plot_boxplot(boxplot_auc_index_df_MCI, "AUC", "../results/MCI boxplot_auc.pdf")
+
+```
+
+
+
+
+####### clustering
+
+```{r}
+risk_group_train_MCI <- time_varying_external_results1_MCI$risk_train %>%
+  mutate(risk_group = case_when(
+    last_risk_score < quantile(last_risk_score, 0.5) ~ "Low Risk",
+    # last_risk_score < quantile(last_risk_score, 0.66) ~ "Medium Risk",
+    TRUE ~ "High Risk"
+  ))
+analyze_risk_groups(NACC_full_df_MCI, risk_group_train_MCI)
+```
+
+
+```{r}
+risk_group_means_train_MCI <- sapply(unique(risk_group_train_MCI$risk_group), function(group) {
+  group_ids <- risk_group_train_MCI$ID[risk_group_train_MCI$risk_group == group]
+  subset_results <- time_varying_external_results1_MCI$risk_train[time_varying_external_results1_MCI$risk_train$ID %in% group_ids, ]
+  mean(subset_results$last_risk_score, na.rm = TRUE)
+})
+names(risk_group_means_train_MCI) <- unique(risk_group_train_MCI$risk_group)
+risk_group_means_train_MCI
+```
+
+
+```{r}
+risk_group_test_MCI <- time_varying_external_results1_MCI$risk_test %>%
+  mutate(
+    risk_group = sapply(last_risk_score, function(score) {
+      differences <- abs(risk_group_means_train_MCI - score)
+      names(differences)[which.min(differences)]
+    })
+  )
+
+analyze_risk_groups(AIBL_full_df_imputed_MCI, risk_group_test_MCI)
+```
+
+```{r}
+selected_features_trajectories_MCI = c("memory_recall2", "animal", "MMSE", "GDS")
+centroid_trajectory_test_MCI = plot_centroid_trajectories(AIBL_full_df_imputed_MCI, risk_group_test_MCI, selected_features_trajectories_MCI, "../results/MCI feature_trajectories_AIBL.pdf")
+```
+
+
+
+```{r}
+risk_group_means_test_MCI <- sapply(unique(risk_group_test_MCI$risk_group), function(group) {
+  group_ids <- risk_group_test_MCI$ID[risk_group_test_MCI$risk_group == group]
+  subset_results <- time_varying_external_results1_MCI$risk_test[time_varying_external_results1_MCI$risk_test$ID %in% group_ids, ]
+  mean(subset_results$last_risk_score, na.rm = TRUE)
+})
+names(risk_group_means_test_MCI) <- unique(risk_group_test_MCI$risk_group)
+risk_group_means_test_MCI
+```
+
+```{r}
+risk_group_test_MCI
+
+```
