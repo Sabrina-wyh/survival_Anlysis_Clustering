@@ -1,5 +1,5 @@
 ####################### preparing for different data structure #################
-
+set.seed(42)
 prepare_for_survival_analysis_n_visits_backward <- function(df, n) {
   process_group <- function(group) {
     ad_indices <- which(group$event == 1)
@@ -67,7 +67,7 @@ aggregate_for_standard_cox <- function(df_processed, static_features, dynamic_fe
     final_record_event <- final_record$event
     
     if (m != 'all') {
-      subset <- head(group, m)
+      subset <- tail(group, m)
     } else {
       subset <- group
     }
@@ -126,141 +126,29 @@ missranger_impute <- function(df, columns_ignores) {
   return(result)
 }
 
-############################### For feature selection ##########################
-mrmr_feature_selection <- function(X, y, num_features = 10) {
-  X <- as.data.frame(X)
-  X <- data.frame(lapply(X, as.numeric))
-  y <- as.numeric(y)
-  breaks <- quantile(y, probs = c(0, 0.33, 0.67, 1))
-  y_cats <- cut(y, breaks = breaks, labels = 1:3, include.lowest = TRUE)
-  data_combined <- cbind(X, target = as.numeric(y_cats))
-  mrmr_data <- mRMRe::mRMR.data(data = data_combined)
-  mrmr_result <- mRMRe::mRMR.classic("mRMRe.Filter", data = mrmr_data, 
-                                     target_indices = ncol(data_combined), 
-                                     feature_count = num_features)
-  selected_indices <- mRMRe::solutions(mrmr_result)[[1]]
-  selected_features <- names(data_combined)[selected_indices]
-  return(selected_features)
-}
 
 ######################### For Model Construction/Evaluation ####################
-do_internal_cv_time_varying_cox <- function(data, folds = 3, iterations = 10, 
-                                            feature_selection = FALSE, 
-                                            shorten_visits = FALSE, 
-                                            n_visits = NULL) {
-  all_c_index_list <- list()
-  all_auc_results <- list()
-  all_predictors <- c()
+
+
+remove_high_corr_scales <- function(df_train, df_test, cols_consider=NULL, threshold = 0.9) { 
+  ### first do the normalisation
+  df_train[, cols_consider] <- as.data.frame(scale(df_train[, cols_consider])) 
+  df_test[, cols_consider] <- as.data.frame(scale(df_test[, cols_consider])) 
   
-  for (iter in 1:iterations) {
-    set.seed(iter)
-    # Split data into folds based on ID
-    unique_ids <- unique(data$ID)
-    fold_assignments <- sample(rep(1:folds, length.out = length(unique_ids)))
-    names(fold_assignments) <- unique_ids
-    c_index_list <- list()
-    auc_results <- list()
-    
-    for (fold in 1:folds) {
-      train_ids <- unique_ids[fold_assignments != fold]
-      test_ids <- unique_ids[fold_assignments == fold]
-      train_data <- data[data$ID %in% train_ids, ]
-      test_data <- data[data$ID %in% test_ids, ]
-      
-      # If shorten_visits is TRUE, apply prepare_for_survival_analysis_n_visits
-      if (shorten_visits) {
-        if (is.null(n_visits)) {
-          stop("If shorten_visits is TRUE, n_visits must be specified.")
-        }
-        test_data <- prepare_for_survival_analysis_n_visits(test_data, n_visits)
-      }
-      
-      predictors <- setdiff(names(train_data), c("start", "stop", "event", "ID"))
-      formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + "), "+ frailty(ID)"))
-      
-      # Check for highly correlated variables and drop them (using training data)
-      corr_matrix <- cor(train_data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
-      high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
-      high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
-      
-      if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
-        vars_to_remove <- unique(rownames(high_corr_pairs))
-        predictors <- setdiff(predictors, vars_to_remove)
-        train_data <- train_data %>% select(-all_of(vars_to_remove))
-        test_data <- test_data %>% select(-all_of(vars_to_remove))
-      }
-      
-      train_data <- train_data %>%
-        mutate(across(everything(), as.numeric)) %>%
-        mutate(across(all_of(predictors), ~ scale(.)[, 1]))
-      
-      test_data <- test_data %>%
-        mutate(across(everything(), as.numeric)) %>%
-        mutate(across(all_of(predictors), ~ scale(.)[, 1]))
-      
-      # Fit Cox proportional hazards model
-      formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + "), "+ frailty(ID)"))
-      cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron",control = coxph.control(iter.max = 50, eps = 1e-04))
-      
-      if (feature_selection){
-        stepwise_model <- stepAIC(cox_model, direction = "both", trace = FALSE)
-        predictor_names_all <- all.vars(formula(stepwise_model))[-1]
-        predictors <- setdiff(predictor_names_all, c("start", "stop", "event", "ID"))
-        formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + "), "+ frailty(ID)"))
-        cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron",control = coxph.control(iter.max = 50, eps = 1e-04))
-      }
-      
-      
-      
-      ###########
-      risk_scores <- predict(cox_model, newdata = test_data, type = "risk")
-      # Compute C-index
-      c_index <- concordance(cox_model, newdata = test_data)$concordance
-      c_index_list[[fold]] <- c_index
-      
-      # Compute AUC for specified time points
-      times <- unique(test_data$stop)
-      times <- as.numeric(times)
-      times <- times[!is.na(times) & times > 0]  # Remove NA and non-positive times
-      
-      auc_result <- timeROC(
-        T = test_data$stop,
-        delta = test_data$event,
-        marker = risk_scores,
-        cause = 1,
-        times = times
-      )
-      auc_results[[fold]] <- auc_result
-      
-      all_predictors <- c(all_predictors, predictors)
-    }
-    
-    all_c_index_list[[iter]] <- c_index_list
-    all_auc_results[[iter]] <- do.call(rbind, lapply(1:folds, function(fold) {
-      data.frame(
-        Iteration = iter,
-        Fold = fold,
-        Time = auc_results[[fold]]$times,
-        AUC = auc_results[[fold]]$AUC
-      )
-    }))
-    
-  }
+  ### remove high correlated features
+  correlation_matrix <- cor(df_train[, cols_consider], use = "pairwise.complete.obs")   
+  high_corr <- findCorrelation(correlation_matrix, cutoff = threshold)   
   
-  auc_summary <- do.call(rbind, all_auc_results)
-  auc_stats <- auc_summary %>%
-    group_by(Time) %>%
-    summarise(
-      Median_AUC = median(AUC, na.rm = TRUE),
-      Q1_AUC = quantile(AUC, 0.25, na.rm = TRUE),
-      Q3_AUC = quantile(AUC, 0.75, na.rm = TRUE)
-    )
+  df_train <- df_train[, !(names(df_train) %in% high_corr)]  
+  df_test <- df_test[, !(names(df_test) %in% high_corr)]   
   
-  # Calculate overall statistics for AUC (across all iterations, folds, and time points)
-  overall_auc_median <- median(auc_summary$AUC, na.rm = TRUE)
-  overall_auc_q1 <- quantile(auc_summary$AUC, 0.25, na.rm = TRUE)
-  overall_auc_q3 <- quantile(auc_summary$AUC, 0.75, na.rm = TRUE)
-  
+  return(list(
+    train = df_train,
+    test = df_test
+  ))
+}
+
+print_model_statistics <- function(all_c_index_list, auc_summary) {
   # Compute overall statistics for C-index
   all_c_indexes <- unlist(all_c_index_list)
   overall_c_median <- median(all_c_indexes, na.rm = TRUE)
@@ -271,10 +159,132 @@ do_internal_cv_time_varying_cox <- function(data, folds = 3, iterations = 10,
   cat("C-index 25th Percentile (Q1):", c_Q1, "\n")
   cat("C-index 75th Percentile (Q3):", c_Q3, "\n\n")
   
+  # Calculate overall statistics for AUC (across all iterations, folds, and time points)
+  overall_auc_median <- median(auc_summary$AUC, na.rm = TRUE)
+  overall_auc_q1 <- quantile(auc_summary$AUC, 0.25, na.rm = TRUE)
+  overall_auc_q3 <- quantile(auc_summary$AUC, 0.75, na.rm = TRUE)
   cat("Overall AUC Median:", overall_auc_median, "\n")
   cat("AUC 25th Percentile (Q1):", overall_auc_q1, "\n")
   cat("AUC 75th Percentile (Q3):", overall_auc_q3, "\n\n")
+}
+
+
+
+do_internal_cv_time_varying_cox <- function(data, iterations = 10, test_ratio = 0.1, folds = 5, feature_selection = FALSE, shorten_visits = FALSE, n_visits = NULL) {
+  all_predictors <- c()
+  all_c_index_list <- list()
+  all_auc_results <- list()
+  num_selected_features <- c()
   
+  # Set up parallel backend
+  num_cores <- detectCores() - 1
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  clusterExport(cl, varlist = c("remove_high_corr_scales", "prepare_for_survival_analysis_n_visits", 
+                                "prepare_for_survival_analysis_n_visits_backward", 
+                                "print_model_statistics", "timeROC"), envir = environment())
+  on.exit(stopCluster(cl), add=TRUE)
+  
+  results <- foreach(iter = 1:iterations, .packages = c("survival", "MASS", "timeROC", "dplyr", "caret")) %dopar% {
+    set.seed(iter)
+    best_c_index <- 0
+    best_features <- NULL
+    unique_ids <- unique(data$ID)
+    test_ids <- sample(unique_ids, size = floor(test_ratio * length(unique_ids)))
+    train_ids <- setdiff(unique_ids, test_ids)
+    train_data <- data[data$ID %in% train_ids, ]
+    test_data <- data[data$ID %in% test_ids, ]
+    fold_assignments <- sample(rep(1:folds, length.out = length(train_ids)))
+    
+    if (shorten_visits && !is.null(n_visits)) {
+      test_data <- prepare_for_survival_analysis_n_visits_backward(test_data, n_visits)
+    }
+    
+    for (fold in 1:folds) {
+      fold_train_ids <- train_ids[fold_assignments != fold]
+      fold_validation_ids <- train_ids[fold_assignments == fold]
+      fold_train_data <- train_data[train_data$ID %in% fold_train_ids, ]
+      fold_validation_data <- train_data[train_data$ID %in% fold_validation_ids, ]
+      
+      if (shorten_visits && !is.null(n_visits)) {
+        fold_validation_data <- prepare_for_survival_analysis_n_visits_backward(fold_validation_data, n_visits)
+      }
+      
+      predictors <- setdiff(names(fold_train_data), c("start", "stop", "event", "ID"))
+      data_preprocess <- remove_high_corr_scales(fold_train_data, fold_validation_data, cols_consider = predictors, threshold = 0.9)
+      fold_train_data <- data_preprocess$train
+      fold_validation_data <- data_preprocess$test
+      
+      predictors <- setdiff(names(fold_train_data), c("start", "stop", "event", "ID"))
+      
+      if (feature_selection) {
+        formula_no_frailty <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + ")))
+        cox_model_no_frailty <- coxph(formula_no_frailty, data = fold_train_data, ties = "efron", control = coxph.control(iter.max = 100, eps = 1e-05))
+        stepwise_model <- stepAIC(cox_model_no_frailty, direction = "both", trace = FALSE)
+        predictors <- all.vars(formula(stepwise_model))[-1]
+        predictors <- setdiff(predictors, c("start", "stop", "event", "ID"))
+      }
+      
+      formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + "), "+ frailty(ID)"))
+      cox_model <- coxph(formula, data = fold_train_data, id = fold_train_data$ID, ties = "efron", control = coxph.control(iter.max = 100, eps = 1e-05))
+      
+      risk_scores <- predict(cox_model, newdata = fold_validation_data, type = "risk")
+      c_index <- concordance(cox_model, newdata = fold_validation_data)$concordance
+      
+      if (c_index > best_c_index) {
+        best_c_index <- c_index
+        best_features <- predictors
+      }
+    }
+    
+    data_preprocess_final <- remove_high_corr_scales(train_data, test_data, cols_consider = predictors, threshold = 0.9)
+    train_data <- data_preprocess_final$train
+    test_data <- data_preprocess_final$test
+    
+    final_train_formula <- as.formula(paste("Surv(start, stop, event) ~", paste(best_features, collapse = " + "), "+ frailty(ID)"))
+    final_model <- coxph(final_train_formula, data = train_data, id = train_data$ID, ties = "efron", control = coxph.control(iter.max = 100, eps = 1e-05))
+    
+    final_risk_scores <- predict(final_model, newdata = test_data, type = "risk")
+    final_c_index <- concordance(final_model, newdata = test_data)$concordance
+    
+    times <- na.omit(as.numeric(unique(test_data$stop)))
+    times <- times[times > 0]
+    
+    auc_result <- timeROC(
+      T = test_data$stop,
+      delta = test_data$event,
+      marker = final_risk_scores,
+      cause = 1,
+      times = times
+    )
+    
+    auc_df <- data.frame(
+      Iteration = iter,
+      Time = auc_result$times,
+      AUC = auc_result$AUC
+    )
+    
+    list(
+      C_Index = final_c_index,
+      Best_Features = best_features,
+      AUC_Results = auc_df
+    )
+  }
+  
+  
+  all_c_index_list <- lapply(results, function(res) res$C_Index)
+  all_auc_results <- do.call(rbind, lapply(results, function(res) res$AUC_Results))
+  all_predictors <- unlist(lapply(results, function(res) res$Best_Features))
+  
+  auc_stats <- all_auc_results %>%
+    group_by(Time) %>%
+    summarise(
+      Median_AUC = median(AUC, na.rm = TRUE),
+      Q1_AUC = quantile(AUC, 0.25, na.rm = TRUE),
+      Q3_AUC = quantile(AUC, 0.75, na.rm = TRUE)
+    )
+  
+  print_model_statistics(all_c_index_list, all_auc_results)
   
   significant_features_freq <- data.frame(
     Feature = names(table(all_predictors)),
@@ -283,29 +293,25 @@ do_internal_cv_time_varying_cox <- function(data, folds = 3, iterations = 10,
   
   return(list(
     C_Index_List = unlist(all_c_index_list),
-    AUC_list = unlist(auc_summary$AUC),
+    AUC_list = unlist(all_auc_results$AUC),
     AUC_Stats = auc_stats,
     Significant_Features_Freq = significant_features_freq
   ))
 }
 
+
 do_external_time_varying_cox <- function(train_data, test_data, shorten_visits = FALSE, n_visits=NULL) {
-  
-  # If shorten_visits is TRUE, apply prepare_for_survival_analysis_n_visits
   if (shorten_visits) {
     if (is.null(n_visits)) {
       stop("If shorten_visits is TRUE, n_visits must be specified.")
     }
-    test_data <- prepare_for_survival_analysis_n_visits(test_data, n_visits)
+    test_data <- prepare_for_survival_analysis_n_visits_backward(test_data, n_visits)
   }
   
   predictors <- setdiff(names(train_data), c("start", "stop", "event", "ID"))
-  train_data <- train_data %>%
-    mutate(across(everything(), as.numeric)) %>%
-    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
-  test_data <- test_data %>%
-    mutate(across(everything(), as.numeric)) %>%
-    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+  data_preprocess <- remove_high_corr_scales(train_data, test_data, cols_consider = predictors, threshold = 0.9)
+  train_data <- data_preprocess$train
+  test_data <- data_preprocess$test
   
   formula <- as.formula(paste("Surv(start, stop, event) ~", paste(predictors, collapse = " + "), "+ frailty(ID)"))
   cox_model <- coxph(formula, data = train_data, id = train_data$ID, ties = "efron",control = coxph.control(iter.max = 50, eps = 1e-04))
@@ -378,140 +384,122 @@ do_external_time_varying_cox <- function(train_data, test_data, shorten_visits =
   
 }
 
-do_internal_cv_normal_cox <- function(data, static_ft=NULL, dynamic_ft=NULL,folds = 5, iterations = 10, feature_selection = FALSE, shorten_visits = FALSE, n_visits = NULL) {
-  all_c_index_list <- list()
-  all_auc_results <- list()
-  all_predictors <- c()
+
+do_internal_cv_normal_cox <- function(data, static_ft = NULL, dynamic_ft = NULL, test_ratio = 0.1, folds = 5, iterations = 10,
+                                      feature_selection = FALSE, shorten_visits = FALSE, n_visits = NULL) {
   
-  for (iter in 1:iterations) {
+  
+  all_predictors <- c()
+  num_cores <- detectCores() - 1
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  on.exit(stopCluster(cl), add=TRUE)
+  clusterExport(cl, varlist = c("remove_high_corr_scales", "prepare_for_survival_analysis_n_visits", 
+                                "prepare_for_survival_analysis_n_visits_backward", 
+                                "aggregate_for_standard_cox",
+                                "print_model_statistics", "timeROC"), envir = environment())
+  
+  results <- foreach(iter = 1:iterations, .packages = c("survival", "MASS", "timeROC", "dplyr", "caret")) %dopar% {
     set.seed(iter)
     unique_ids <- unique(data$ID)
-    fold_assignments <- sample(rep(1:folds, length.out = length(unique_ids)))
-    names(fold_assignments) <- unique_ids
-    c_index_list <- list()
-    auc_results <- list()
+    test_ids <- sample(unique_ids, size = floor(test_ratio * length(unique_ids)))
+    train_ids <- setdiff(unique_ids, test_ids)
+    train_data <- data[data$ID %in% train_ids, ]
+    test_data <- data[data$ID %in% test_ids, ]
+    
+    fold_assignments <- sample(rep(1:folds, length.out = length(train_ids)))
+    names(fold_assignments) <- train_ids
+    best_c_index <- 0
+    best_features <- NULL
     
     for (fold in 1:folds) {
+      train_fold_ids <- train_ids[fold_assignments != fold]
+      val_fold_ids <- train_ids[fold_assignments == fold]
+      fold_train_data <- train_data[train_data$ID %in% train_fold_ids, ]
+      fold_validation_data <- train_data[train_data$ID %in% val_fold_ids, ]
       
-      c_index_list[[fold]] <- NA
-      auc_results[[fold]] <- list(times = numeric(0), AUC = numeric(0))
-      tryCatch({
-        train_ids <- unique_ids[fold_assignments != fold]
-        test_ids <- unique_ids[fold_assignments == fold]
-        train_data <- data[data$ID %in% train_ids, ]
-        test_data <- data[data$ID %in% test_ids, ]
       if (!is.null(static_ft) || !is.null(dynamic_ft)) {
-        train_data = aggregate_for_standard_cox(train_data, static_ft, dynamic_ft, m = "all")
-        train_data <- train_data[, colSums(is.na(train_data)) == 0]
-        # predictors <- setdiff(names(train_data), c("time", "event", "ID"))
-        predictors <- names(train_data)[-which(names(train_data) %in% c("time", "event", "ID"))]
-        # If shorten_visits is TRUE, apply prepare_for_survival_analysis_n_visits
+        fold_train_data <- aggregate_for_standard_cox(fold_train_data, static_ft, dynamic_ft, m = "all")
+        fold_train_data_cols_valid <- names(fold_train_data[, colSums(is.na(fold_train_data)) == 0])
+        predictors <- setdiff(fold_train_data_cols_valid, c("time", "event", "ID"))
+        
         if (shorten_visits) {
-          if (is.null(n_visits)) {
-            stop("If shorten_visits is TRUE, n_visits must be specified.")
-          }
-          test_data <- aggregate_for_standard_cox(test_data, static_ft, dynamic_ft, m = n_visits)
-          test_data <- test_data[, colSums(is.na(test_data)) == 0]
-          test_var = names(test_data)[-which(names(test_data) %in% c("time", "event", "ID"))]
-          predictors <- intersect(predictors, test_var)
+          fold_validation_data <- aggregate_for_standard_cox(fold_validation_data, static_ft, dynamic_ft, m = n_visits)
+        } else {
+          fold_validation_data <- aggregate_for_standard_cox(fold_validation_data, static_ft, dynamic_ft, m = "all")
         }
-        else{
-          test_data <- aggregate_for_standard_cox(test_data, static_ft, dynamic_ft, m = 'all')
-          test_var = names(test_data)[-which(names(test_data) %in% c("time", "event", "ID"))]
-          predictors <- intersect(predictors, test_var)
-        }
-      }
-      else{
-        predictors <- setdiff(names(train_data), c("time", "event", "ID"))
+        fold_validation_data_cols_valid <- names(fold_validation_data[, colSums(is.na(fold_validation_data)) == 0])
+        predictors <- intersect(predictors, setdiff(fold_validation_data_cols_valid, c("time", "event", "ID")))
+      } else {
+        predictors <- setdiff(names(fold_train_data), c("time", "event", "ID"))
       }
       
+      data_preprocess <- remove_high_corr_scales(fold_train_data, fold_validation_data, cols_consider = predictors, threshold = 0.9)
+      fold_train_data <- data_preprocess$train
+      fold_validation_data <- data_preprocess$test
       
-      # Check for highly correlated variables and drop them (using training data)
-      corr_matrix <- cor(train_data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
-      high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
-      high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
-      
-      if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
-        vars_to_remove <- unique(rownames(high_corr_pairs))
-        predictors <- setdiff(predictors, vars_to_remove)
-        train_data <- train_data %>% select(-all_of(vars_to_remove))
-        test_data <- test_data %>% select(-all_of(vars_to_remove))
-      }
-      
-      train_data <- train_data %>%
-        mutate(across(everything(), as.numeric)) %>%
-        mutate(across(all_of(predictors), ~ scale(.)[, 1]))
-      
-      test_data <- test_data %>%
-        mutate(across(everything(), as.numeric)) %>%
-        mutate(across(all_of(predictors), ~ scale(.)[, 1]))
-      
-      # Fit Cox proportional hazards model
       formula <- as.formula(paste("Surv(time, event) ~", paste(predictors, collapse = " + ")))
-      cox_model <- coxph(formula, data = train_data)
+      cox_model <- coxph(formula, data = fold_train_data)
       
-      if (feature_selection){
-        stepwise_model <- suppressWarnings(stepAIC(cox_model, direction = "both", trace = FALSE, steps = 5000, k =10))
-        predictor_names_all <- all.vars(formula(stepwise_model))[-1]
-        predictors <- setdiff(predictor_names_all, c("time", "event", "ID"))
-        formula <- as.formula(paste("Surv(time, event) ~", paste(predictors, collapse = " + "), "+ frailty(ID)"))
-        cox_model <- coxph(formula, data = train_data, control = coxph.control(iter.max = 50, eps = 1e-04))
+      if (feature_selection) {
+        stepwise_model <- suppressWarnings(stepAIC(cox_model, direction = "both", trace = FALSE, steps = 5000, k = 10))
+        predictors <- setdiff(all.vars(formula(stepwise_model))[-1], c("time", "event", "ID"))
       }
       
-      risk_scores <- predict(cox_model, newdata = test_data, type = "risk")
-      c_index <- concordance(cox_model, newdata = test_data)$concordance
-      c_index_list[[fold]] <- c_index
+      risk_scores <- predict(cox_model, newdata = fold_validation_data, type = "risk")
+      c_index <- concordance(cox_model, newdata = fold_validation_data)$concordance
       
-      # Compute AUC for specified time points
-      times <- unique(test_data$time)
-      times <- as.numeric(times)
-      times <- times[!is.na(times) & times > 0]  # Remove NA and non-positive times
-      
-      if (length(times) > 0) {
-        auc_result <- timeROC(
-          T = test_data$time,
-          delta = test_data$event,
-          marker = predict(cox_model, newdata = test_data, type = "risk"),
-          cause = 1,
-          times = times
-        )
-        auc_results[[fold]] <- auc_result
+      if (c_index > best_c_index) {
+        best_c_index <- c_index
+        best_features <- predictors
       }
-      
-      # auc_result <- timeROC(
-      #   T = test_data$time,
-      #   delta = test_data$event,
-      #   marker = risk_scores,
-      #   cause = 1,
-      #   times = times
-      # )
-      # auc_results[[fold]] <- auc_result
-      all_predictors <- c(all_predictors, predictors)
-      }, error = function(e) {
-          cat("Error in iteration", iter, "fold", fold, ": ", e$message, "\nContinuing to next iteration...\n")
-        })
-
     }
     
-    all_c_index_list[[iter]] <- c_index_list
-    all_auc_results[[iter]] <- do.call(rbind, lapply(1:folds, function(fold) {
-      if (length(auc_results[[fold]]$times) > 0) {
-        data.frame(
-          Iteration = iter,
-          Fold = fold,
-          Time = auc_results[[fold]]$times,
-          AUC = auc_results[[fold]]$AUC
-        )
+    if (!is.null(static_ft) || !is.null(dynamic_ft)) {
+      train_data <- aggregate_for_standard_cox(train_data, static_ft, dynamic_ft, m = "all")
+      if (shorten_visits) {
+        test_data <- aggregate_for_standard_cox(test_data, static_ft, dynamic_ft, m = n_visits)
       } else {
-        # Return an empty data frame with the correct structure if no AUC was calculated
-        data.frame(Iteration = integer(0), Fold = integer(0), Time = numeric(0), AUC = numeric(0))
+        test_data <- aggregate_for_standard_cox(test_data, static_ft, dynamic_ft, m = "all")
       }
-    }))
+    }
     
+    final_formula <- as.formula(paste("Surv(time, event) ~", paste(best_features, collapse = " + ")))
+    final_model <- coxph(final_formula, data = train_data)
+    
+    final_risk_scores <- predict(final_model, newdata = test_data, type = "risk")
+    final_c_index <- concordance(final_model, newdata = test_data)$concordance
+    
+    times <- unique(test_data$time)
+    times <- as.numeric(times[!is.na(times) & times > 0])
+    
+    auc_result <- timeROC(
+      T = test_data$time,
+      delta = test_data$event,
+      marker = final_risk_scores,
+      cause = 1,
+      times = times
+    )
+    
+    auc_df <- data.frame(
+      Iteration = iter,
+      Time = auc_result$times,
+      AUC = auc_result$AUC
+    )
+    
+    list(
+      C_Index = final_c_index,
+      AUC_DF = auc_df,
+      Predictors = best_features
+    )
   }
   
-  auc_summary <- do.call(rbind, all_auc_results)
-  auc_stats <- auc_summary %>%
+  
+  all_c_index_list <- sapply(results, function(x) x$C_Index)
+  all_auc_results_df <- do.call(rbind, lapply(results, function(x) x$AUC_DF))
+  all_predictors <- unlist(lapply(results, function(x) x$Predictors))
+  
+  auc_stats <- all_auc_results_df %>%
     group_by(Time) %>%
     summarise(
       Median_AUC = median(AUC, na.rm = TRUE),
@@ -519,24 +507,7 @@ do_internal_cv_normal_cox <- function(data, static_ft=NULL, dynamic_ft=NULL,fold
       Q3_AUC = quantile(AUC, 0.75, na.rm = TRUE)
     )
   
-  # Calculate overall statistics for AUC (across all iterations, folds, and time points)
-  overall_auc_median <- median(auc_summary$AUC, na.rm = TRUE)
-  overall_auc_q1 <- quantile(auc_summary$AUC, 0.25, na.rm = TRUE)
-  overall_auc_q3 <- quantile(auc_summary$AUC, 0.75, na.rm = TRUE)
-  
-  # Compute overall statistics for C-index
-  all_c_indexes <- unlist(all_c_index_list)
-  overall_c_median <- median(all_c_indexes, na.rm = TRUE)
-  c_Q1 <- quantile(all_c_indexes, 0.25, na.rm = TRUE)
-  c_Q3 <- quantile(all_c_indexes, 0.75, na.rm = TRUE)
-  
-  cat("Overall C-index Median:", overall_c_median, "\n")
-  cat("C-index 25th Percentile (Q1):", c_Q1, "\n")
-  cat("C-index 75th Percentile (Q3):", c_Q3, "\n\n")
-  
-  cat("Overall AUC Median:", overall_auc_median, "\n")
-  cat("AUC 25th Percentile (Q1):", overall_auc_q1, "\n")
-  cat("AUC 75th Percentile (Q3):", overall_auc_q3, "\n\n")
+  print_model_statistics(all_c_index_list, all_auc_results_df)
   
   significant_features_freq <- data.frame(
     Feature = names(table(all_predictors)),
@@ -545,12 +516,11 @@ do_internal_cv_normal_cox <- function(data, static_ft=NULL, dynamic_ft=NULL,fold
   
   return(list(
     C_Index_List = unlist(all_c_index_list),
-    AUC_list = unlist(auc_summary$AUC),
+    AUC_list = unlist(all_auc_results_df$AUC),
     AUC_Stats = auc_stats,
     Significant_Features_Freq = significant_features_freq
   ))
 }
-
 
 
 do_external_normal_cox <- function(train_data, test_data, static_ft=NULL, dynamic_ft=NULL, shorten_visits = FALSE, n_visits=NULL) {
@@ -579,23 +549,9 @@ do_external_normal_cox <- function(train_data, test_data, static_ft=NULL, dynami
     predictors <- setdiff(names(train_data), c("time", "event", "ID"))
   }
   
-  corr_matrix <- cor(train_data %>% select(all_of(predictors)), use = "pairwise.complete.obs")
-  high_corr_pairs <- which(abs(corr_matrix) > 0.9, arr.ind = TRUE)
-  high_corr_pairs <- high_corr_pairs[high_corr_pairs[, 1] < high_corr_pairs[, 2], , drop = FALSE]
-  
-  if (!is.null(nrow(high_corr_pairs)) && nrow(high_corr_pairs) > 0) {
-    vars_to_remove <- unique(rownames(high_corr_pairs))
-    predictors <- setdiff(predictors, vars_to_remove)
-    train_data <- train_data %>% select(-all_of(vars_to_remove))
-    test_data <- test_data %>% select(-all_of(vars_to_remove))
-  }
-  
-  train_data <- train_data %>%
-    mutate(across(everything(), as.numeric)) %>%
-    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
-  test_data <- test_data %>%
-    mutate(across(everything(), as.numeric)) %>%
-    mutate(across(all_of(predictors), ~ scale(.)[, 1]))
+  data_preprocess <- remove_high_corr_scales(train_data, test_data, cols_consider = predictors, threshold = 0.9)
+  train_data <- data_preprocess$train
+  test_data <- data_preprocess$test
   
   formula <- as.formula(paste("Surv(time, event) ~", paste(predictors, collapse = " + ")))
   cox_model <- suppressWarnings(coxph(formula, data = train_data, control = coxph.control(iter.max = 50, eps = 1e-04)))

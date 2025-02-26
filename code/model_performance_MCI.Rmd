@@ -6,7 +6,7 @@ output: pdf_document
 ---
 
 ```{r}
-rm(list = ls())
+# rm(list = ls())
 library(survival)
 library(broom)
 library(ggplot2)
@@ -54,20 +54,20 @@ AIBL_full_df_imputed_MCI<- missranger_impute(AIBL_full_df_MCI, c(c(index_feature
 ## time varying cox
 ### APOE4 + age
 ```{r}
-time_varying_APOE4_NACC_full_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10)
+time_varying_APOE4_NACC_full_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=50)
 ```
 
 
 
 ```{r}
-time_varying_APOE4_NACC_full_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=3)
+time_varying_APOE4_NACC_full_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-time_varying_APOE4_NACC_full_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=2)
+time_varying_APOE4_NACC_full_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=50, shorten_visits = TRUE, n_visits=2)
 ```
 ```{r}
-time_varying_APOE4_NACC_full_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=10, shorten_visits = TRUE, n_visits=1)
+time_varying_APOE4_NACC_full_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(basic_fts_MCI, index_feature_MCI))], folds = 3, iterations=50, shorten_visits = TRUE, n_visits=1)
 ```
 
 ```{r}
@@ -76,21 +76,21 @@ plot_auc_trajectory_group(list(time_varying_APOE4_NACC_full_results1_MCI$AUC_Sta
 
 ### all Feature
 ```{r}
-time_varying_all_NACC_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10)
+time_varying_all_NACC_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50)
 ```
 
 
 
 ```{r}
-time_varying_all_NACC_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+time_varying_all_NACC_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-time_varying_all_NACC_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+time_varying_all_NACC_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
 ```
 
 ```{r}
-time_varying_all_NACC_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, shorten_visits = TRUE, n_visits=1)
+time_varying_all_NACC_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, shorten_visits = TRUE, n_visits=1)
 ```
 
 ```{r}
@@ -99,7 +99,7 @@ plot_auc_trajectory_group(list(time_varying_all_NACC_results1_MCI$AUC_Stats, tim
 
 ### Feature Selection - AIC
 ```{r}
-time_varying_all_NACC_AIC_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE)
+time_varying_all_NACC_AIC_results1_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, feature_selection = TRUE)
 num_ft_MCI = round(sum(time_varying_all_NACC_AIC_results1_MCI$Significant_Features_Freq$Frequency) / 50)
 final_selected_feature_MCI = head(time_varying_all_NACC_AIC_results1_MCI$Significant_Features_Freq$Feature, num_ft_MCI)
 ```
@@ -107,15 +107,15 @@ final_selected_feature_MCI = head(time_varying_all_NACC_AIC_results1_MCI$Signifi
 
 
 ```{r}
-time_varying_all_NACC_AIC_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE, shorten_visits = TRUE, n_visits=3)
+time_varying_all_NACC_AIC_results2_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, feature_selection = TRUE, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-time_varying_all_NACC_AIC_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE, shorten_visits = TRUE, n_visits=2)
+time_varying_all_NACC_AIC_results3_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, feature_selection = TRUE, shorten_visits = TRUE, n_visits=2)
 ```
 
 ```{r}
-time_varying_all_NACC_AIC_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=10, feature_selection = TRUE, shorten_visits = TRUE, n_visits=1)
+time_varying_all_NACC_AIC_results4_MCI <- do_internal_cv_time_varying_cox(NACC_full_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, index_feature_MCI))], folds = 5, iterations=50, feature_selection = TRUE, shorten_visits = TRUE, n_visits=1)
 ```
 
 ```{r}
@@ -146,17 +146,17 @@ plot_auc_trajectory_group(list(time_varying_all_NACC_AIC_results1_MCI$AUC_Stats,
 ## aggregated normal cox
 ### APOE + Age
 ```{r}
-aggregate_APOE4_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=10)
+aggregate_APOE4_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=50)
 ```
 
 
 
 ```{r}
-aggregate_APOE4_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+aggregate_APOE4_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-aggregate_APOE4_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+aggregate_APOE4_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, c("APOE4"), c("age"), folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
 ```
 
 ```{r}
@@ -170,17 +170,17 @@ static_fts_MCI = c("age", "sex", "edu", "APOE4")
 dynamic_fts_MCI = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT","BMI", "blood_pressure_diastolic", "blood_pressure_systolic", "Heart_rate")
 
 
-aggregate_all_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10)
+aggregate_all_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=50)
 ```
 
 
 
 ```{r}
-aggregate_all_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+aggregate_all_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-aggregate_all_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+aggregate_all_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
 ```
 
 ```{r}
@@ -189,7 +189,7 @@ plot_auc_trajectory_group(list(aggregate_all_NACC_results1_MCI$AUC_Stats, aggreg
 
 ### Feature Selection - AIC
 ```{r}
-aggregate_fts_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10,feature_selection = TRUE)
+aggregate_fts_NACC_results1_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=50,feature_selection = TRUE)
 ```
 
 ```{r}
@@ -199,11 +199,11 @@ print(final_selected_feature_agg_MCI)
 ```
 
 ```{r}
-aggregate_fts_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=3)
+aggregate_fts_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-aggregate_fts_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=10, shorten_visits = TRUE, n_visits=2)
+aggregate_fts_NACC_results3_MCI <- do_internal_cv_normal_cox(NACC_full_df_MCI, static_fts_MCI, dynamic_fts_MCI, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
 ```
 
 ```{r}
@@ -217,11 +217,11 @@ NACC_baseline_df_MCI$time = NACC_baseline_df_MCI$stop - NACC_baseline_df_MCI$sta
 ```
 
 ```{r}
-baseline_APOE4_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, c("APOE4", "age", "event", "time", "ID")], folds = 5, iterations=10)
+baseline_APOE4_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, c("APOE4", "age", "event", "time", "ID")], folds = 5, iterations=50)
 ```
 
 ```{r}
-baseline_all_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10)
+baseline_all_NACC_results_MCI <- do_internal_cv_normal_cox(NACC_baseline_df_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=50)
 ```
 
 ```{r}
@@ -237,15 +237,15 @@ NACC_baseline_df2_MCI$time = NACC_baseline_df2_MCI$stop - NACC_baseline_df2_MCI$
 ```
 
 ```{r}
-baseline_APOE4_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, c("APOE4", "age", "event", "time", "ID")], folds = 5, iterations=10)
+baseline_APOE4_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, c("APOE4", "age", "event", "time", "ID")], folds = 5, iterations=50)
 ```
 
 ```{r}
-baseline_all_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10)
+baseline_all_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=50)
 ```
 
 ```{r}
-baseline_fts_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=10, feature_selection = TRUE)
+baseline_fts_NACC_results2_MCI <- do_internal_cv_normal_cox(NACC_baseline_df2_MCI[, unique(c(Cog_fts_MCI, demo_fts_MCI, basic_fts_MCI, c("event", "time", "ID") ))], folds = 5, iterations=50, feature_selection = TRUE)
 ```
 
 
