@@ -1,10 +1,10 @@
-# Prediction for Early and Late-Stage Cognitive Decline Using Repeated Measurements and Time-Dependent Cox Regression
+# Using a Survival Analysis Model with Repeated Measurements to Predict Risk of Alzheimer’s Disease
 
-This is the official repository accompanying the paper **Prediction for Early and Late-Stage Cognitive Decline Using Repeated Measurements and Time-Dependent Cox Regression**
+This is the official repository accompanying the paper **Using a Survival Analysis Model with Repeated Measurements to Predict Risk of Alzheimer’s Disease**
 
 **Authors:**
 
-Yihan Wang, Benjamin Goudey, Xinran Cui, Shu Liu, Colin L. Masters, Liang Jin, Yijun Pan
+Yihan Wang, Benjamin Goudey, Xinran Cui, Shu Liu, Colin L. Masters, Liang Jin, Yijun Pan; for the AIBL Research Group
 
 ## Overview
 We utilized data from 1,973 National Alzheimer's Coordinating Center (NACC) and 942 The Australian Imaging, Biomarkers and Lifestyle (AIBL) study participants to constitute a survival analysis considering repeated measurements to develop the Alzheimer’s Disease Risk Score (ADRS) model. The ADRS model can then predict the risk score and then stratified the particiapnts into high- and low-risk group.
