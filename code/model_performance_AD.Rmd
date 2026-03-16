@@ -50,6 +50,12 @@ index_feature = c("start", "stop", "event", "ID")
 ```
 
 ```{r}
+colMeans(is.na(NACC_full_df)) * 100
+colMeans(is.na(AIBL_full_df)) * 100
+```
+
+
+```{r}
 AIBL_full_df_imputed<- missranger_impute(AIBL_full_df, c(c(index_feature), "Classification"))
 ```
 
@@ -85,7 +91,6 @@ time_varying_all_NACC_results1 <- do_internal_cv_time_varying_cox(NACC_full_df[,
 ```
 
 
-
 ```{r}
 time_varying_all_NACC_results2 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
@@ -104,11 +109,34 @@ plot_auc_trajectory_group(list(time_varying_all_NACC_results1$AUC_Stats, time_va
 
 ### Feature Selection - AIC
 ```{r}
+# Internal cross-validation with AIC feature selection
 time_varying_all_NACC_AIC_results1 <- do_internal_cv_time_varying_cox(NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))], folds = 5, iterations=50, feature_selection = TRUE)
-num_ft = round(sum(time_varying_all_NACC_AIC_results1$Significant_Features_Freq$Frequency) / 10)
-final_selected_feature = head(time_varying_all_NACC_AIC_results1$Significant_Features_Freq$Feature, num_ft)
 ```
 
+```{r}
+# num_ft = round(sum(time_varying_all_NACC_AIC_results1$Significant_Features_Freq$Frequency) / 10)
+# final_selected_feature = head(time_varying_all_NACC_AIC_results1$Significant_Features_Freq$Feature, num_ft)
+
+# Train final model on full NACC dataset with AIC selection
+NACC_train_data <- NACC_full_df[, unique(c(Cog_fts, demo_fts, basic_fts, index_feature))]
+train_predictors <- setdiff(names(NACC_train_data), c("start", "stop", "event", "ID"))
+
+# Scale and remove high correlation
+data_preprocess <- remove_high_corr_scales(NACC_train_data, NACC_train_data, cols_consider = train_predictors, threshold = 0.9)
+train_data_scaled <- data_preprocess$train
+train_predictors_scaled <- setdiff(names(train_data_scaled), c("start", "stop", "event", "ID"))
+
+# Fit initial model with all features (without frailty for stepAIC)
+formula_initial <- as.formula(paste("Surv(start, stop, event) ~", paste(train_predictors_scaled, collapse = " + ")))
+cox_model_initial <- coxph(formula_initial, data = train_data_scaled, ties = "efron", control = coxph.control(iter.max = 100, eps = 1e-05))
+
+# Apply AIC-based stepwise selection
+stepwise_model <- stepAIC(cox_model_initial, direction = "both", trace = FALSE)
+final_selected_feature <- setdiff(all.vars(formula(stepwise_model))[-1], c("start", "stop", "event", "ID"))
+
+cat("Features selected by AIC on full NACC cohort:n")
+print(final_selected_feature)
+```
 
 
 ```{r}
@@ -124,24 +152,79 @@ time_varying_all_NACC_AIC_results4 <- do_internal_cv_time_varying_cox(NACC_full_
 ```
 
 ```{r}
-filtered_data <- time_varying_all_NACC_AIC_results1$Significant_Features_Freq %>%
-  filter(Feature != "frailty(ID)")
+# filtered_data <- time_varying_all_NACC_AIC_results1$Significant_Features_Freq %>%
+#   filter(Feature != "frailty(ID)")
+# 
+# ft_plot <- ggplot(filtered_data, aes(x = Frequency, y = reorder(Feature, Frequency))) +
+#   geom_bar(stat = "identity", fill = "#619cff") +
+#   theme_minimal() +
+#   labs(title = "Feature Frequency", x = "Frequency", y = "Feature") +
+#   theme(
+#     plot.title = element_text(hjust = 0.5, size = 14),
+#     axis.title = element_text(size = 12),
+#     axis.text = element_text(size = 10),
+#     panel.grid = element_blank()  # Remove all grid lines
+#   )
+# 
+# # Save the plot as a PDF
+# ggsave("../results/AD feature_importance_plot.pdf", plot = ft_plot, device = "pdf", width = 10, height = 5)
+# 
+# print(ft_plot)
+feature_rename_AD <- c(
+  "CDR_SB"                   = "CDR Sum of Boxes",
+  "MMSE"                     = "MMSE Score",
+  "memory_recall2"           = "LM-II",
+  "animal"                   = "Animal Fluency Test",
+  # "GDS"                      = "Geriatric Depression Scale",
+  # "APOE4"                    = "APOE ε4 Status",
+  "age"                      = "Age",
+  "edu"                      = "Education",
+  "sex"                      = "Sex",
+  "BMI"                      = "BMI",
+  "blood_pressure_diastolic" = "BP(Diastolic)",
+  "blood_pressure_systolic"  = "BP(Systolic)",
+  "Heart_rate"               = "Heart Rate",
+  "memory_recall1"           = "LM-I",
+  "Digit_Span_F"             = "Digit Span Forward",
+  "Digit_Span_B"             = "Digit Span Backward"
+  # "BNT"                      = "Boston Naming Test"
+)
 
-ft_plot <- ggplot(filtered_data, aes(x = Frequency, y = reorder(Feature, Frequency))) +
-  geom_bar(stat = "identity", fill = "#619cff") +
-  theme_minimal() +
-  labs(title = "Feature Frequency", x = "Frequency", y = "Feature") +
-  theme(
-    plot.title = element_text(hjust = 0.5, size = 14),
-    axis.title = element_text(size = 12),
-    axis.text = element_text(size = 10),
-    panel.grid = element_blank()  # Remove all grid lines
+filtered_data_AD <- time_varying_all_NACC_AIC_results1$Significant_Features_Freq %>%
+  filter(Feature != "frailty(ID)") %>%
+  mutate(
+    Feature_Label = ifelse(
+      Feature %in% names(feature_rename_AD),
+      feature_rename_AD[Feature],
+      Feature
+    ),
+    Feature_Label = factor(Feature_Label,
+                           levels = Feature_Label[order(Frequency)])
   )
 
-# Save the plot as a PDF
-ggsave("../results/AD feature_importance_plot.pdf", plot = ft_plot, device = "pdf", width = 10, height = 5)
+ft_plot_AD <- ggplot(filtered_data_AD,
+    aes(x = Frequency, y = Feature_Label)) +
+  geom_bar(stat = "identity", fill = "#9bbf8a", width = 0.7) +
+  labs(x = "Frequency", y = NULL) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.background  = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.y      = element_blank(),
+    axis.ticks.y     = element_blank(),
+    axis.title.x     = element_text(size = 14, face = "bold"),
+    axis.text.x      = element_text(size = 10),
+    axis.text.y      = element_text(size = 11)
+  )
 
-print(ft_plot)
+ggsave("../results/AD_panel_C_feature_importance_plot.pdf",
+       plot   = ft_plot_AD,
+       device = "pdf",
+       width  = 7,
+       height = 4)
+print(ft_plot_AD)
 ```
 
 ```{r}
@@ -151,17 +234,17 @@ plot_auc_trajectory_group(list(time_varying_all_NACC_AIC_results1$AUC_Stats, tim
 ## aggregated normal cox
 ### APOE + Age
 ```{r}
-aggregate_APOE4_NACC_results1 <- do_internal_cv_normal_cox(NACC_full_df, c("APOE4"), c("age"), folds = 5, iterations=50)
+aggregate_APOE4_NACC_results1 <- do_internal_cv_normal_cox(NACC_full_df, c("APOE4","age"),c(),, folds = 5, iterations=50)
 ```
 
 
 
 ```{r}
-aggregate_APOE4_NACC_results2 <- do_internal_cv_normal_cox(NACC_full_df, c("APOE4"), c("age"), folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
+aggregate_APOE4_NACC_results2 <- do_internal_cv_normal_cox(NACC_full_df, c("APOE4","age"),c(),, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
 ```
 
 ```{r}
-aggregate_APOE4_NACC_results3 <- do_internal_cv_normal_cox(NACC_full_df, c("APOE4"), c("age"), folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
+aggregate_APOE4_NACC_results3 <- do_internal_cv_normal_cox(NACC_full_df, c("APOE4","age"),c(),, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
 ```
 
 ```{r}
@@ -198,6 +281,7 @@ static_fts = c("age", "sex", "edu", "APOE4")
 dynamic_fts = c("CDR_SB", "GDS", "MMSE", "memory_recall1", "memory_recall2", "Digit_Span_F", "Digit_Span_B", "animal", "BNT","BMI", "blood_pressure_diastolic", "blood_pressure_systolic", "Heart_rate")
 aggregate_fts_NACC_results1 <- do_internal_cv_normal_cox(NACC_full_df, static_fts, dynamic_fts, folds = 5, iterations=20,feature_selection = TRUE)
 ```
+
 ```{r}
 num_ft_agg = round(sum(aggregate_fts_NACC_results1$Significant_Features_Freq$Frequency) / 50)
 final_selected_feature_agg = head(aggregate_fts_NACC_results1$Significant_Features_Freq$Feature, num_ft_agg)
@@ -208,11 +292,11 @@ print(final_selected_feature_agg)
 
 
 ```{r}
-aggregate_fts_NACC_results2 <- do_internal_cv_normal_cox(NACC_full_df, static_fts, dynamic_fts, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3)
+aggregate_fts_NACC_results2 <- do_internal_cv_normal_cox(NACC_full_df, static_fts, dynamic_fts, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=3,feature_selection = TRUE)
 ```
 
 ```{r}
-aggregate_fts_NACC_results3 <- do_internal_cv_normal_cox(NACC_full_df, static_fts, dynamic_fts, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2)
+aggregate_fts_NACC_results3 <- do_internal_cv_normal_cox(NACC_full_df, static_fts, dynamic_fts, folds = 5, iterations=50, shorten_visits = TRUE, n_visits=2,feature_selection = TRUE)
 ```
 
 ```{r}
@@ -268,6 +352,7 @@ baseline_fts_NACC_results2 <- do_internal_cv_normal_cox(NACC_baseline_df2[, uniq
 
 
 ##########################################################################
+
 # External Validation
 ## time-varying
 ```{r}
@@ -275,12 +360,13 @@ print(final_selected_feature)
 ```
 
 ```{r}
-selected_features = c("APOE4", "CDR_SB", "edu", "memory_recall2", "animal", "MMSE")
+# Use AIC-selected features directly (no manual selection)
+selected_features <- final_selected_feature
 time_varying_external_results1 <- do_external_time_varying_cox(NACC_full_df[, unique(c(selected_features, index_feature))], AIBL_full_df_imputed[, unique(c(selected_features, index_feature))])
 ```
 
 ```{r}
-create_forest_plot(time_varying_external_results1$model_summary, "Forest Plot for Time-Varying Cox Model", "../results/AD forest_plot.pdf")
+# create_forest_plot(time_varying_external_results1$model_summary, "Forest Plot for Time-Varying Cox Model", "../results/AD forest_plot.pdf")
 ```
 
 
@@ -367,76 +453,210 @@ plot_auc_trajectory_group(list(baseline_all_NACC_results2$AUC_Stats, baseline_AP
 
 ## box plots
 ```{r}
-boxplot_c_index_df <- data.frame(model = character(), feature_set = character(), value = numeric(), stringsAsFactors = FALSE)
+# ============================================================
+# PANEL A: AUC Boxplot — model comparison
+# x-axis: APOE4+age | full features | AIC selected | external (AIBL)
+# fill: model type
+# ============================================================
+# ============================================================
+# REBUILD AUC BOXPLOT DATAFRAME - AD
+# ============================================================
 
+boxplot_auc_index_df_AD <- data.frame(
+  model = character(), feature_set = character(),
+  value = numeric(), stringsAsFactors = FALSE
+)
 
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[init]", "APOE4+age (internal-NACC)", baseline_APOE4_NACC_results$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[last]", "APOE4+age (internal-NACC)", baseline_APOE4_NACC_results2$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "aggregated-cox", "APOE4+age (internal-NACC)", aggregate_APOE4_NACC_results1$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "time-cox(FADRS-AD)", "APOE4+age (internal-NACC)", time_varying_APOE4_NACC_full_results1$C_Index_List)
+# baseline-cox[init]
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "baseline-cox[init]",
+  "APOE4+age (internal-NACC)",             na.omit(baseline_APOE4_NACC_results$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "baseline-cox[init]",
+  "full features (internal-NACC)",          na.omit(baseline_all_NACC_results$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "baseline-cox[init]",
+  "AIC feature selection (internal-NACC)",  na.omit(baseline_fts_NACC_results$AUC_list))
 
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[init]", "full features (internal-NACC)", baseline_all_NACC_results$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[last]", "full features (internal-NACC)", baseline_all_NACC_results2$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "aggregated-cox", "full features (internal-NACC)", aggregate_all_NACC_results1$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "time-cox(FADRS-AD)", "full features (internal-NACC)", time_varying_all_NACC_results1$C_Index_List)
+# baseline-cox[last]
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "baseline-cox[last]",
+  "APOE4+age (internal-NACC)",             na.omit(baseline_APOE4_NACC_results2$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "baseline-cox[last]",
+  "full features (internal-NACC)",          na.omit(baseline_all_NACC_results2$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "baseline-cox[last]",
+  "AIC feature selection (internal-NACC)",  na.omit(baseline_fts_NACC_results2$AUC_list))
 
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[init]", "AIC feature selection (internal-NACC)", baseline_fts_NACC_results$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[last]", "AIC feature selection (internal-NACC)", baseline_fts_NACC_results2$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "aggregated-cox", "AIC feature selection (internal-NACC)", aggregate_fts_NACC_results1$C_Index_List)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "time-cox(FADRS-AD)", "AIC feature selection (internal-NACC)", time_varying_all_NACC_AIC_results1$C_Index_List)
+# aggregated-cox
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "aggregated-cox",
+  "APOE4+age (internal-NACC)",             na.omit(aggregate_APOE4_NACC_results1$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "aggregated-cox",
+  "full features (internal-NACC)",          na.omit(aggregate_all_NACC_results1$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "aggregated-cox",
+  "AIC feature selection (internal-NACC)",  na.omit(aggregate_fts_NACC_results1$AUC_list))
 
+# time-cox(FADRS-AD)
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "time-cox(FADRS-AD)",
+  "APOE4+age (internal-NACC)",             na.omit(time_varying_APOE4_NACC_full_results1$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "time-cox(FADRS-AD)",
+  "full features (internal-NACC)",          na.omit(time_varying_all_NACC_results1$AUC_list))
+boxplot_auc_index_df_AD <- add_data(boxplot_auc_index_df_AD, "time-cox(FADRS-AD)",
+  "AIC feature selection (internal-NACC)",  na.omit(time_varying_all_NACC_AIC_results1$AUC_list))
 
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[init]", "selected feature set (external-AIBL)", baseline_AIBL_results1$C_Index)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "baseline-cox[last]", "selected feature set (external-AIBL)", baseline_AIBL_results2$C_Index)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "aggregated-cox", "selected feature set (external-AIBL)", aggregate_fts_AIBL_results1$C_Index)
-boxplot_c_index_df = add_data(boxplot_c_index_df, "time-cox(FADRS-AD)", "selected feature set (external-AIBL)", time_varying_external_results1$C_Index)
+boxplot_auc_index_df_AD <- boxplot_auc_index_df_AD %>%
+  mutate(
+    model = factor(model, levels = c(
+      "baseline-cox[init]", "baseline-cox[last]",
+      "aggregated-cox", "time-cox(FADRS-AD)"
+    )),
+    feature_set = factor(feature_set, levels = c(
+      "APOE4+age (internal-NACC)",
+      "full features (internal-NACC)",
+      "AIC feature selection (internal-NACC)"
+    ))
+  ) %>%
+  filter(is.finite(value))
 
-boxplot_c_index_df$model <- factor(boxplot_c_index_df$model, levels = c("baseline-cox[init]", "baseline-cox[last]", "aggregated-cox", "time-cox(FADRS-AD)"))
-boxplot_c_index_df$feature_set <- factor(boxplot_c_index_df$feature_set, levels = c("APOE4+age (internal-NACC)", "full features (internal-NACC)", "AIC feature selection (internal-NACC)", "selected feature set (external-AIBL)"))
+panel_A_df_AD <- bind_rows(
+  # internal — APOE4+age
+  boxplot_auc_index_df_AD %>%
+    filter(feature_set == "APOE4+age (internal-NACC)") %>%
+    mutate(feature_set = "APOE4+age"),
+
+  # internal — full features
+  boxplot_auc_index_df_AD %>%
+    filter(feature_set == "full features (internal-NACC)") %>%
+    mutate(feature_set = "full features"),
+
+  # internal — AIC selected
+  boxplot_auc_index_df_AD %>%
+    filter(feature_set == "AIC feature selection (internal-NACC)") %>%
+    mutate(feature_set = "AIC selected"),
+
+  # external — AIBL (all 4 models)
+  data.frame(
+    model       = "baseline-cox[init]",
+    feature_set = "external (AIBL)",
+    value       = na.omit(baseline_AIBL_results1$AUC_list)
+  ),
+  data.frame(
+    model       = "baseline-cox[last]",
+    feature_set = "external (AIBL)",
+    value       = na.omit(baseline_AIBL_results2$AUC_list)
+  ),
+  data.frame(
+    model       = "aggregated-cox",
+    feature_set = "external (AIBL)",
+    value       = na.omit(aggregate_fts_AIBL_results1$AUC_list)
+  ),
+  data.frame(
+    model       = "time-cox(FADRS-AD)",
+    feature_set = "external (AIBL)",
+    value       = na.omit(time_varying_external_results1$AUC_list)
+  )
+) %>%
+  mutate(
+    feature_set = factor(feature_set, levels = c(
+      "APOE4+age", "full features", "AIC selected", "external (AIBL)"
+    )),
+    model = factor(model, levels = c(
+      "baseline-cox[init]", "baseline-cox[last]",
+      "aggregated-cox", "time-cox(FADRS-AD)"
+    ))
+  ) %>%
+  filter(is.finite(value))
+
+p_A_AD <- plot_boxplot_with_anno(
+  df             = panel_A_df_AD,
+  y_label        = "AUC",
+  save_path      = "../results/AD_panel_A_auc_model_comparison.pdf",
+  compare_group1 = "baseline-cox[init]",
+  compare_group2 = "time-cox(FADRS-AD)",
+  fill_var       = "model"
+)
+print(p_A_AD)
+
 ```
 
 
 ```{r}
-plot_boxplot(boxplot_c_index_df, "C-index", "../results/AD boxplot_c_index.pdf")
+# ============================================================
+# PANEL B: AUC Boxplot — visit comparison, time-cox only
+# x-axis: APOE4+age | full features | AIC selected | external (AIBL)
+# fill: visit count
+# ============================================================
 
+panel_B_df_AD <- bind_rows(
+  # internal — APOE4+age, all visits
+  data.frame(feature_set = "APOE4+age", visit = "full visits",
+             value = na.omit(time_varying_APOE4_NACC_full_results1$AUC_list)),
+  data.frame(feature_set = "APOE4+age", visit = "3-visits",
+             value = na.omit(time_varying_APOE4_NACC_full_results2$AUC_list)),
+  data.frame(feature_set = "APOE4+age", visit = "2-visits",
+             value = na.omit(time_varying_APOE4_NACC_full_results3$AUC_list)),
+  data.frame(feature_set = "APOE4+age", visit = "1-visit",
+             value = na.omit(time_varying_APOE4_NACC_full_results4$AUC_list)),
+
+  # internal — full features, all visits
+  data.frame(feature_set = "full features", visit = "full visits",
+             value = na.omit(time_varying_all_NACC_results1$AUC_list)),
+  data.frame(feature_set = "full features", visit = "3-visits",
+             value = na.omit(time_varying_all_NACC_results2$AUC_list)),
+  data.frame(feature_set = "full features", visit = "2-visits",
+             value = na.omit(time_varying_all_NACC_results3$AUC_list)),
+  data.frame(feature_set = "full features", visit = "1-visit",
+             value = na.omit(time_varying_all_NACC_results4$AUC_list)),
+
+  # internal — AIC selected, all visits
+  data.frame(feature_set = "AIC selected", visit = "full visits",
+             value = na.omit(time_varying_all_NACC_AIC_results1$AUC_list)),
+  data.frame(feature_set = "AIC selected", visit = "3-visits",
+             value = na.omit(time_varying_all_NACC_AIC_results2$AUC_list)),
+  data.frame(feature_set = "AIC selected", visit = "2-visits",
+             value = na.omit(time_varying_all_NACC_AIC_results3$AUC_list)),
+  data.frame(feature_set = "AIC selected", visit = "1-visit",
+             value = na.omit(time_varying_all_NACC_AIC_results4$AUC_list)),
+
+  # external — AIBL, time-cox only, all visits
+  data.frame(feature_set = "external (AIBL)", visit = "full visits",
+             value = na.omit(time_varying_external_results1$AUC_list)),
+  data.frame(feature_set = "external (AIBL)", visit = "3-visits",
+             value = na.omit(time_varying_external_results2$AUC_list)),
+  data.frame(feature_set = "external (AIBL)", visit = "2-visits",
+             value = na.omit(time_varying_external_results3$AUC_list)),
+  data.frame(feature_set = "external (AIBL)", visit = "1-visit",
+             value = na.omit(time_varying_external_results4$AUC_list))
+) %>%
+  mutate(
+    feature_set = factor(feature_set, levels = c(
+      "APOE4+age", "full features", "AIC selected", "external (AIBL)"
+    )),
+    visit = factor(visit, levels = c(
+      "full visits", "3-visits", "2-visits", "1-visit"
+    ))
+  ) %>%
+  filter(is.finite(value)) %>%
+  rename(model = visit)
+
+# rename back
+panel_B_df_AD <- panel_B_df_AD %>% rename(visit = model)
+
+p_B_AD <- plot_boxplot_with_anno(
+  df             = panel_B_df_AD,
+  y_label        = "AUC",
+  save_path      = "../results/AD_panel_B_auc_visit_comparison.pdf",
+  compare_group1 = "full visits",
+  compare_group2 = "1-visit",
+  fill_var       = "visit"
+)
+print(p_B_AD)
 ```
 
 
 ```{r}
-boxplot_auc_index_df <- data.frame(model = character(), feature_set = character(), value = numeric(), stringsAsFactors = FALSE)
-
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[init]", "APOE4+age (internal-NACC)", na.omit(baseline_APOE4_NACC_results$AUC_list))
-
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[init]", "full features (internal-NACC)", na.omit(baseline_all_NACC_results$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[init]", "AIC feature selection (internal-NACC)", na.omit(baseline_fts_NACC_results$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[init]", "selected feature set (external-AIBL)", na.omit(baseline_AIBL_results1$AUC_list))
-
-
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[last]", "APOE4+age (internal-NACC)", na.omit(baseline_APOE4_NACC_results2$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[last]", "full features (internal-NACC)", na.omit(baseline_all_NACC_results2$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[last]", "AIC feature selection (internal-NACC)", na.omit(baseline_fts_NACC_results2$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "baseline-cox[last]", "selected feature set (external-AIBL)", na.omit(baseline_AIBL_results2$AUC_list))
-
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "aggregated-cox", "APOE4+age (internal-NACC)", na.omit(aggregate_APOE4_NACC_results1$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "aggregated-cox", "full features (internal-NACC)", na.omit(aggregate_all_NACC_results1$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "aggregated-cox", "AIC feature selection (internal-NACC)", na.omit(aggregate_fts_NACC_results1$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "aggregated-cox", "selected feature set (external-AIBL)", na.omit(aggregate_fts_AIBL_results1$AUC_list))
-
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "time-cox(FADRS-AD)", "APOE4+age (internal-NACC)", na.omit(time_varying_APOE4_NACC_full_results1$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "time-cox(FADRS-AD)", "full features (internal-NACC)", na.omit(time_varying_all_NACC_results1$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "time-cox(FADRS-AD)", "AIC feature selection (internal-NACC)", na.omit(time_varying_all_NACC_AIC_results1$AUC_list))
-boxplot_auc_index_df = add_data(boxplot_auc_index_df, "time-cox(FADRS-AD)", "selected feature set (external-AIBL)", na.omit(time_varying_external_results1$AUC_list))
-
-boxplot_auc_index_df$model <- factor(boxplot_auc_index_df$model, levels = c("baseline-cox[init]", "baseline-cox[last]", "aggregated-cox", "time-cox(FADRS-AD)"))
-boxplot_auc_index_df$feature_set <- factor(boxplot_auc_index_df$feature_set, levels = c("APOE4+age (internal-NACC)", "full features (internal-NACC)", "AIC feature selection (internal-NACC)", "selected feature set (external-AIBL)"))
+create_forest_plot(
+  summary_results = time_varying_external_results1$model_summary,
+  title           = "Forest Plot — Time-Varying Cox (AD)",
+  file_path_name  = "../results/AD_panel_D_forest_plot.pdf",
+  feature_rename  = feature_rename_AD
+)
 ```
-
-```{r}
-plot_boxplot(boxplot_auc_index_df, "AUC", "../results/AD boxplot_auc.pdf")
-
-```
-
-
 
 
 
@@ -476,8 +696,24 @@ analyze_risk_groups(AIBL_full_df_imputed, risk_group_test)
 ```
 
 ```{r}
-selected_features_trajectories = c("CDR_SB", "memory_recall2", "animal", "MMSE", "BMI")
-centroid_trajectory_test = plot_centroid_trajectories(AIBL_full_df_imputed, risk_group_test, selected_features_trajectories, "../results/AD feature_trajectories_AIBL.pdf")
+# selected_features_trajectories = c("CDR_SB", "memory_recall2", "animal", "MMSE", "BMI")
+# centroid_trajectory_test = plot_centroid_trajectories(AIBL_full_df_imputed, risk_group_test, selected_features_trajectories, "../results/AD feature_trajectories_AIBL.pdf")
+
+# ============================================================
+# CENTROID TRAJECTORIES - AD
+# ============================================================
+
+selected_features_trajectories <- c("animal", "BMI", "CDR_SB", "memory_recall2","MMSE")
+
+centroid_trajectory_test <- plot_centroid_trajectories(
+  df                             = AIBL_full_df_imputed,
+  risk_group                     = risk_group_test,
+  selected_features_trajectories = selected_features_trajectories,
+  pdf_path                       = "../results/AD_panel_E_feature_trajectories_AIBL.pdf",
+  feature_rename                 = feature_rename_AD,
+  palette                        = c( "#9bbf8a", "#fa8878")
+)
+
 ```
 
 
