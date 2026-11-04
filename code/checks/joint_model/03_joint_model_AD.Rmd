@@ -1,0 +1,251 @@
+---
+title: "Joint longitudinal–survival model (JMbayes2) at the month-48 landmark"
+subtitle: "Endpoint: `r params$endpoint`"
+output: html_document
+params:
+  endpoint: "AD"
+  mode: "standard"
+  trial: FALSE
+  n_iter: NULL
+  n_burnin: NULL
+  predict_samples: NULL
+  n_chains: NULL
+  penalty_alphas: "ridge"
+  parallel_fits: TRUE
+  histories: !r c("baseline_visit", "1_visit", "2_visits", "3_visits", "all_visits")
+  train_histories: "3_visits"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Purpose and specification
+
+The joint model uses each participant's **own irregular visit times**. It fits a trajectory for
+every repeated measure and links the current value of each trajectory to the hazard of the event.
+Its predictions are scored by `04_evaluate_and_plot.ipynb` with exactly the same metrics as every other model.
+**Archived: not part of the current analysis.** The association parameters did not converge (logical-memory
+scores LM-I and LM-II, r = 0.89, not identifiable; max R-hat 3.7 with a ridge prior, 2.5 with a horseshoe prior).
+Kept for reference. To rerun, render from this folder (`checks/joint_model/`); it reads the shared inputs of step 1.
+
+**Trial run first.** Render with `params = list(trial = TRUE)` to fit only the first outer fold with
+short MCMC chains. It reports the run time, an estimate for the full run and convergence, and writes to
+`results/<endpoint>/JointModel_trial/`, which the evaluation ignores. Then render without `trial` for the full run.
+
+Outputs: `results/<endpoint>/JointModel/` (predictions.csv, parameters, convergence, timing)
+and `plots/<endpoint>/FigureS7_JM_association`, `FigureS8_JM_traceplots`.
+
+| Component | Specification |
+|---|---|
+| Time scale | t = (visit month − 48) / 12 years (negative before the landmark); event time = years after month 48 |
+| Longitudinal part | one linear mixed model per repeated measure: `marker ~ t`, random intercept and slope per participant; markers standardised on training data; missing values excluded per marker |
+| Repeated measures | all 13 repeated measures, the same as the other models (no pre-selection: the shrinkage prior shrinks unimportant associations) |
+| Survival part | Cox submodel with baseline age, sex, education and APOE4 (standardised), penalised B-spline baseline hazard |
+| Association | current value of each marker; **ridge shrinkage prior on the association parameters** (`priors = list(penalty_alphas = "ridge")`), the Bayesian counterpart of the ridge penalty in Landmark Cox. The horseshoe prior was tried first but did not converge (R-hat up to 2.5): it picks one of two highly correlated markers (LM-I and LM-II) and different chains picked different ones |
+| Computation | the outer-fold and full-NACC fits run in parallel (`parallel_fits`), each with its MCMC chains in parallel; predictions use all but one core (`parallel = "multicore"`) |
+| Training | development participants' full longitudinal history (administratively censored at landmark + 120 months) |
+| Prediction | survival at 48 + 24…60 months, conditional on being event-free at month 48, from each participant's visits at or before month 48 under **the same history conditions as the other models**: first visit, latest 1, 2, 3 and all prior visits (selected backward from month 48). One fitted model per training set; only the visits given to the prediction step change |
+| Training-set predictions | needed only for the risk-group threshold (Figure 3), so they are made for the primary history (latest 3) only (`train_histories`); test-set predictions are made for every history |
+
+```{r load}
+source("r_landmark_models.R")
+suppressPackageStartupMessages({ library(JMbayes2); library(ggplot2) })
+mode <- Sys.getenv("SURVIVAL_RUN_MODE", params$mode)  # "standard" or "smoke"
+sh <- load_shared_inputs(params$endpoint, mode)
+cfg <- sh$config
+grid <- cfg$evaluation_grid_months
+basic <- cfg$basic_predictors
+fits <- make_fits(sh)
+n_cores <- parallel::detectCores()
+settings <- jm_settings(mode, params$penalty_alphas, cfg$seed)  # MCMC settings: r_landmark_models.R
+markers <- cfg$dynamic_predictors
+model_name <- "JointModel"
+full_settings <- settings
+if (isTRUE(params$trial)) {
+  fits <- fits["outer_1"]
+  settings[c("n_chains", "n_iter", "n_burnin", "predict_samples")] <- list(2, 1000, 300, 50)
+  model_name <- "JointModel_trial"
+}
+# Optional overrides, e.g. params = list(n_iter = 8000, n_burnin = 2000, predict_samples = 100).
+for (k in c("n_chains", "n_iter", "n_burnin", "predict_samples")) {
+  if (!is.null(params[[k]])) settings[[k]] <- params[[k]]
+}
+if (!isTRUE(params$trial)) full_settings <- settings
+final_name <- tail(names(fits), 1)
+# Fits run side by side; each uses n_chains cores for its chains.
+n_parallel <- if (isTRUE(params$parallel_fits)) max(1, min(length(fits), floor(n_cores / settings$n_chains))) else 1
+settings$n_parallel_fits <- n_parallel
+knitr::kable(aggregate(cbind(n = 1, events = event) ~ cohort, data = sh$cohort, FUN = sum),
+             caption = "Landmark cohort (event-free at month 48, at least 3 visits by month 48)")
+str(settings)
+```
+
+## Fit per training set and predict from the landmark
+
+Run time is several hours in standard mode (MCMC; `r length(fits)` fits, `r n_parallel` at a time; predictions for `r length(params$histories)` history conditions).
+
+Checkpoints: each fitted model and each fit's predictions are saved in `checkpoints/` as soon as they
+are done. If a run stops, rendering again reuses them, but only when the inputs and all settings are
+identical (otherwise they are recomputed). Delete `checkpoints/` to force a complete rerun.
+
+```{r fit}
+helper_file <- normalizePath("r_landmark_models.R")
+ckpt_dir <- file.path(output_dirs(params$endpoint, mode, model_name)$results, "checkpoints")
+dir.create(ckpt_dir, recursive = TRUE, showWarnings = FALSE)
+fit_key <- list(inputs = cfg$file_sha256, markers = markers, basic = basic,
+                mcmc = settings[c("n_chains", "n_iter", "n_burnin", "n_thin", "penalty_alphas", "seed")])
+pred_key <- c(fit_key, list(predict = settings[c("predict_samples", "predict_cores", "predict_parallel",
+                                                "landmark_time_eps")],
+                            histories = params$histories, train_histories = params$train_histories,
+                            trial = isTRUE(params$trial)))
+read_checkpoint <- function(path, key) {
+  if (!file.exists(path)) return(NULL)
+  old <- readRDS(path)
+  if (identical(old$key, key)) old$value else NULL
+}
+fit_one <- function(name) {
+  path <- file.path(ckpt_dir, paste0("fit_", name, ".rds"))
+  key <- c(fit_key, list(train = fits[[name]]$train))
+  saved <- read_checkpoint(path, key)
+  if (!is.null(saved)) return(c(saved, list(reused = TRUE)))
+  t0 <- Sys.time()
+  jf <- jm_fit(sh, fits[[name]]$train, markers, basic, settings)
+  value <- list(fit = jf, minutes = as.numeric(difftime(Sys.time(), t0, units = "mins")))
+  saveRDS(list(key = key, value = value), path)
+  c(value, list(reused = FALSE))
+}
+t_all <- Sys.time()
+if (n_parallel > 1) {
+  cl <- parallel::makeCluster(n_parallel)
+  fitted <- tryCatch({
+    parallel::clusterExport(cl, c("helper_file", "sh", "fits", "markers", "basic", "settings", "ckpt_dir",
+                                  "fit_key", "read_checkpoint"), envir = environment())
+    parallel::clusterEvalQ(cl, { source(helper_file); NULL })
+    parallel::parLapplyLB(cl, names(fits), fit_one)
+  }, finally = parallel::stopCluster(cl))
+} else {
+  fitted <- lapply(names(fits), fit_one)
+}
+names(fitted) <- names(fits)
+fit_wall_minutes <- as.numeric(difftime(Sys.time(), t_all, units = "mins"))
+cat(sprintf("All fits: %.1f min wall time (%d in parallel); reused from checkpoints: %s\n", fit_wall_minutes,
+            n_parallel, paste(names(fitted)[vapply(fitted, `[[`, TRUE, "reused")], collapse = ", ")))
+
+# Predictions one fit at a time, each spread over predict_cores: test participants for every history,
+# training participants for train_histories only (risk-group threshold).
+histories <- params$histories
+stopifnot(all(histories %in% HISTORIES), all(params$train_histories %in% histories))
+pred_parts <- list(); assoc_parts <- list(); timing <- list()
+for (name in names(fits)) {
+  f <- fits[[name]]; jf <- fitted[[name]]$fit
+  assoc_parts[[name]] <- jm_association_table(jf, name)
+  pred_path <- file.path(ckpt_dir, paste0("predictions_", name, ".rds"))
+  saved <- read_checkpoint(pred_path, c(pred_key, list(fit = name)))
+  if (!is.null(saved)) {
+    pred_parts[names(saved$parts)] <- saved$parts; timing[[name]] <- saved$timing
+    cat("Predictions for", name, "reused from checkpoint\n")
+    next
+  }
+  t0 <- Sys.time()
+  for (history in histories) {
+    sets <- if (!isTRUE(params$trial) && history %in% params$train_histories) c("train", "test") else "test"
+    for (set in sets) {
+      cohort <- if (set == "train") "NACC" else f$test_cohort
+      ids <- f[[set]]
+      s <- jm_predict(jf, sh, ids, cohort, grid, settings, history)
+      pred_parts[[paste(name, history, set)]] <- prediction_frame(ids, cohort, name, set, model_name,
+                                                                  history, s, grid)
+    }
+  }
+  t_pred <- as.numeric(difftime(Sys.time(), t0, units = "mins"))
+  n_pred <- sum(vapply(pred_parts[grepl(paste0("^", name, " "), names(pred_parts))], nrow, 1))
+  timing[[name]] <- data.frame(fit = name, markers = paste(markers, collapse = ";"),
+                               penalty_alphas = settings$penalty_alphas, n_chains = settings$n_chains,
+                               n_iter = settings$n_iter, n_train = length(f$train),
+                               fit_minutes = fitted[[name]]$minutes, fits_in_parallel = n_parallel,
+                               predict_minutes_per_1000 = 1000 * t_pred / n_pred,
+                               predict_cores = settings$predict_cores)
+  print(timing[[name]])
+  mine <- grepl(paste0("^", name, " "), names(pred_parts))
+  saveRDS(list(key = c(pred_key, list(fit = name)), value = list(parts = pred_parts[mine], timing = timing[[name]])),
+          pred_path)
+}
+final_fit <- fitted[[final_name]]$fit
+predictions <- do.call(rbind, pred_parts)
+association <- do.call(rbind, assoc_parts)
+if (isTRUE(params$trial)) {
+  # Trial: no predictions for the evaluation; estimate the full run time instead.
+  dirs <- output_dirs(params$endpoint, mode, model_name)
+  all_fits <- make_fits(sh)
+  n_predict <- sum(vapply(all_fits, function(f) length(histories) * length(f$test) +
+                                       length(params$train_histories) * length(f$train), 1))
+  tm <- timing[[1]]
+  scale_iter <- full_settings$n_iter / settings$n_iter
+  full_parallel <- if (isTRUE(params$parallel_fits)) max(1, min(length(all_fits), floor(n_cores / full_settings$n_chains))) else 1
+  # Parallel fits share the machine, so allow ~30% slower fits when run side by side.
+  fit_rounds <- ceiling(length(all_fits) / full_parallel) * if (full_parallel > 1) 1.3 else 1
+  estimate_hours <- (fit_rounds * tm$fit_minutes * scale_iter +
+                     n_predict / 1000 * tm$predict_minutes_per_1000 * full_settings$predict_samples / settings$predict_samples) / 60
+  cat(sprintf("Trial fit: %.1f min; estimated full %s run: about %.1f hours\n", tm$fit_minutes, params$endpoint, estimate_hours))
+  write.csv(transform(tm, estimated_full_run_hours = estimate_hours), file.path(dirs$results, "trial_timing.csv"), row.names = FALSE)
+} else {
+  dirs <- write_predictions(predictions, sh, params$endpoint, mode, model_name, histories,
+                            c(settings, list(train_histories = params$train_histories)))
+}
+write.csv(association, file.path(dirs$results, "survival_and_association_parameters.csv"), row.names = FALSE)
+write.csv(do.call(rbind, timing), file.path(dirs$results, "fit_timing.csv"), row.names = FALSE)
+cat("Outputs written to", dirs$results, "\n")
+```
+
+## Convergence
+
+R-hat below 1.05 for every survival and association parameter is required before the
+predictions are used in the manuscript.
+
+```{r convergence}
+conv <- aggregate(Rhat ~ fit, data = association, FUN = max)
+names(conv)[2] <- "max_Rhat"
+conv$converged <- conv$max_Rhat < 1.05
+write.csv(conv, file.path(dirs$results, "convergence.csv"), row.names = FALSE)
+knitr::kable(conv, digits = 3)
+```
+
+```{r traceplots, fig.width=9, fig.height=7}
+pdf(file.path(dirs$plots, paste0(if (isTRUE(params$trial)) "trial_" else "", "FigureS8_JM_traceplots.pdf")), width = 9, height = 7)
+traceplot(final_fit$model, parm = "alphas")
+dev.off()
+traceplot(final_fit$model, parm = "alphas")
+```
+
+## Association parameters of the final (full-NACC) model
+
+Log hazard ratio per 1 SD of the current marker value (95% credible interval), after `r params$penalty_alphas` shrinkage.
+
+```{r association, fig.width=7, fig.height=5}
+labels <- c(age = "Age", sex = "Sex", edu = "Education", APOE4 = "APOE4", CDR_SB = "CDR-SB",
+            GDS = "GDS", MMSE = "MMSE", memory_recall1 = "LM-I", memory_recall2 = "LM-II",
+            Digit_Span_F = "Digit span F", Digit_Span_B = "Digit span B", animal = "Animal fluency",
+            BNT = "BNT", BMI = "BMI", blood_pressure_diastolic = "BP diastolic",
+            blood_pressure_systolic = "BP systolic", Heart_rate = "Heart rate")
+final <- association[association$fit == final_name, ]
+final$feature <- sub("^value\\((.*)\\)$", "\\1", final$term)
+final$type <- ifelse(grepl("^value\\(", final$term), "Current marker value", "Baseline feature")
+final$label <- labels[final$feature]
+final$label <- factor(final$label, levels = final$label[order(final$Mean)])
+knitr::kable(final[, c("term", "Mean", "2.5%", "97.5%", "Rhat")], digits = 3)
+p_alpha <- ggplot(final, aes(Mean, label, colour = type)) + geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
+  geom_errorbarh(aes(xmin = `2.5%`, xmax = `97.5%`), height = .2) + geom_point(size = 2) +
+  scale_colour_manual(values = c("Current marker value" = "#E69F00", "Baseline feature" = "#0072B2")) +
+  labs(x = "Log hazard ratio per 1 SD (95% credible interval)", y = NULL, colour = NULL,
+       title = sprintf("%s: joint model (full NACC)", params$endpoint)) +
+  theme_classic(base_size = 11) + theme(legend.position = "bottom")
+prefix <- if (isTRUE(params$trial)) "trial_" else ""
+ggsave(file.path(dirs$plots, paste0(prefix, "FigureS7_JM_association.pdf")), p_alpha, width = 7, height = 5)
+ggsave(file.path(dirs$plots, paste0(prefix, "FigureS7_JM_association.png")), p_alpha, width = 7, height = 5, dpi = 400)
+p_alpha
+```
+
+```{r session}
+sessionInfo()
+```
