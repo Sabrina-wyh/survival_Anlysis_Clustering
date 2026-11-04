@@ -2,7 +2,7 @@
 
 This is the official repository accompanying the paper **Using a Survival Analysis Model with Repeated Measurements to Predict Risk of Alzheimer’s Disease**.
 
-**Authors:** Yihan Wang, Benjamin Goudey, Xinran Cui, Shu Liu, Colin L. Masters, Liang Jin, Yijun Pan; for the AIBL Research Group
+**Authors:** Yihan Wang, Benjamin Goudey, Shu Liu, Xinran Cui, Colin L. Masters, Liang Jin, Yijun Pan; for the AIBL Research Group
 
 ## Overview
 
